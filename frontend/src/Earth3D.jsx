@@ -1,17 +1,466 @@
 import React, { useRef, useEffect, useState } from 'react';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls';
+import { radioStations } from './radioStations';
+import songDetectionService from './songDetection';
 import './Earth3D.css';
+
+// Alarm Form Component
+const AlarmForm = ({ selectedStation, onSchedule, onClose }) => {
+  const [time, setTime] = useState('');
+  const [selectedStationForAlarm, setSelectedStationForAlarm] = useState(selectedStation || radioStations[0]);
+
+  const handleSubmit = (e) => {
+    e.preventDefault();
+    if (time && selectedStationForAlarm) {
+      onSchedule(selectedStationForAlarm, time);
+    }
+  };
+
+  return (
+    <form className="alarm-form" onSubmit={handleSubmit}>
+      <div className="alarm-form-group">
+        <label>Station</label>
+        <select 
+          value={selectedStationForAlarm?.streamUrl || ''} 
+          onChange={(e) => {
+            const station = radioStations.find(s => s.streamUrl === e.target.value);
+            setSelectedStationForAlarm(station);
+          }}
+          className="alarm-select"
+        >
+          {radioStations.map((station, index) => (
+            <option key={index} value={station.streamUrl}>
+              {station.station} - {station.capital}, {station.name}
+            </option>
+          ))}
+        </select>
+      </div>
+      <div className="alarm-form-group">
+        <label>Time</label>
+        <input 
+          type="time" 
+          value={time}
+          onChange={(e) => setTime(e.target.value)}
+          className="alarm-time-input"
+          required
+        />
+      </div>
+      <div className="alarm-form-actions">
+        <button type="button" onClick={onClose} className="alarm-cancel-btn">Cancel</button>
+        <button type="submit" className="alarm-submit-btn">Schedule</button>
+      </div>
+    </form>
+  );
+};
 
 const Earth3D = () => {
   const mountRef = useRef(null);
+  const audioRef = useRef(null);
   const [loading, setLoading] = useState(true);
   const [loadingProgress, setLoadingProgress] = useState(0);
   const [selectedCountry, setSelectedCountry] = useState(null);
   const [currentTime, setCurrentTime] = useState(new Date());
   const [isPlaying, setIsPlaying] = useState(false);
   const [showInfoPanel, setShowInfoPanel] = useState(false);
+  const [hasStarted, setHasStarted] = useState(false);
+  const [isLoadingAudio, setIsLoadingAudio] = useState(false);
+  const [audioError, setAudioError] = useState(null);
+  const [favorites, setFavorites] = useState([]);
+  const [showFavorites, setShowFavorites] = useState(false);
+  const [isAttemptingPlay, setIsAttemptingPlay] = useState(false);
+  const [isLocked, setIsLocked] = useState(false);
+  const [history, setHistory] = useState([]);
+  const [showHistory, setShowHistory] = useState(false);
+  const [showAlarmModal, setShowAlarmModal] = useState(false);
+  const [showAlarms, setShowAlarms] = useState(false);
+  const [alarms, setAlarms] = useState([]);
+  const [detectedSong, setDetectedSong] = useState(null);
+  const [isDetectingSong, setIsDetectingSong] = useState(false);
+  const [markerColor, setMarkerColor] = useState(0x4CAF50); // Default green
+  const [showColorPicker, setShowColorPicker] = useState(false);
+  // Initialize showStars from localStorage, default to false if not set
+  const [showStars, setShowStars] = useState(() => {
+    const saved = localStorage.getItem('radioGardenShowStars');
+    return saved !== null ? saved === 'true' : false;
+  });
+  const sceneRef = useRef(null);
+  const controlsRef = useRef(null);
+  const cameraRef = useRef(null);
+  const isLockedRef = useRef(false);
+  const markerGroupsRef = useRef([]);
+  const markerMaterialsRef = useRef([]); // Store materials directly for easier updates
+  const starsRef = useRef(null); // Reference to stars object
   
+  // Initialize audio element
+  useEffect(() => {
+    if (!audioRef.current) {
+      audioRef.current = new Audio();
+      audioRef.current.crossOrigin = 'anonymous';
+      audioRef.current.preload = 'none';
+      
+      const handleLoadStart = () => {
+        setIsLoadingAudio(true);
+        setAudioError(null);
+      };
+      
+      const handleCanPlay = () => {
+        setIsLoadingAudio(false);
+        setAudioError(null);
+        setIsAttemptingPlay(false);
+      };
+      
+      const handleError = (e) => {
+        setIsLoadingAudio(false);
+        // Only set error if we were actually attempting to play
+        if (isAttemptingPlay) {
+          setAudioError('Failed to load audio stream');
+          setIsPlaying(false);
+          setIsAttemptingPlay(false);
+        }
+        console.error('Audio error:', e);
+      };
+      
+      const handleEnded = () => {
+        setIsPlaying(false);
+      };
+      
+      audioRef.current.addEventListener('loadstart', handleLoadStart);
+      audioRef.current.addEventListener('canplay', handleCanPlay);
+      audioRef.current.addEventListener('error', handleError);
+      audioRef.current.addEventListener('ended', handleEnded);
+      
+      return () => {
+        if (audioRef.current) {
+          audioRef.current.removeEventListener('loadstart', handleLoadStart);
+          audioRef.current.removeEventListener('canplay', handleCanPlay);
+          audioRef.current.removeEventListener('error', handleError);
+          audioRef.current.removeEventListener('ended', handleEnded);
+          audioRef.current.pause();
+          audioRef.current.src = '';
+        }
+      };
+    }
+  }, [isAttemptingPlay]);
+
+  // Clear error when station changes
+  useEffect(() => {
+    if (selectedCountry) {
+      setAudioError(null);
+    }
+  }, [selectedCountry]);
+
+  // Load favorites, history, alarms, marker color, and stars preference from localStorage on mount
+  // Load marker color FIRST so it's available when markers are created
+  useEffect(() => {
+    const savedMarkerColor = localStorage.getItem('radioGardenMarkerColor');
+    if (savedMarkerColor) {
+      const colorValue = parseInt(savedMarkerColor, 16);
+      if (!isNaN(colorValue)) {
+        setMarkerColor(colorValue);
+      }
+    }
+    const savedShowStars = localStorage.getItem('radioGardenShowStars');
+    if (savedShowStars !== null) {
+      setShowStars(savedShowStars === 'true');
+    }
+  }, []);
+
+  useEffect(() => {
+    const savedFavorites = localStorage.getItem('radioGardenFavorites');
+    if (savedFavorites) {
+      setFavorites(JSON.parse(savedFavorites));
+    }
+    const savedHistory = localStorage.getItem('radioGardenHistory');
+    if (savedHistory) {
+      setHistory(JSON.parse(savedHistory));
+    }
+    const savedAlarms = localStorage.getItem('radioGardenAlarms');
+    if (savedAlarms) {
+      setAlarms(JSON.parse(savedAlarms));
+    }
+  }, []);
+
+  // Save favorites, history, and alarms to localStorage
+  useEffect(() => {
+    localStorage.setItem('radioGardenFavorites', JSON.stringify(favorites));
+  }, [favorites]);
+
+  useEffect(() => {
+    localStorage.setItem('radioGardenHistory', JSON.stringify(history));
+  }, [history]);
+
+  useEffect(() => {
+    localStorage.setItem('radioGardenAlarms', JSON.stringify(alarms));
+  }, [alarms]);
+
+  // Save marker color to localStorage
+  useEffect(() => {
+    localStorage.setItem('radioGardenMarkerColor', markerColor.toString(16));
+  }, [markerColor]);
+
+  // Save stars preference to localStorage
+  useEffect(() => {
+    localStorage.setItem('radioGardenShowStars', showStars.toString());
+  }, [showStars]);
+
+  // Update stars visibility when showStars changes
+  useEffect(() => {
+    const updateStarsVisibility = () => {
+      if (starsRef.current && sceneRef.current) {
+        // Check if stars are already in the scene by checking the parent
+        const isInScene = starsRef.current.parent === sceneRef.current;
+        
+        if (showStars) {
+          if (!isInScene) {
+            sceneRef.current.add(starsRef.current);
+          }
+        } else {
+          if (isInScene) {
+            sceneRef.current.remove(starsRef.current);
+          }
+        }
+      }
+    };
+    
+    // Small delay to ensure scene and stars are ready
+    const timeoutId = setTimeout(updateStarsVisibility, 50);
+    return () => clearTimeout(timeoutId);
+  }, [showStars]);
+
+  // Update marker colors when markerColor changes
+  useEffect(() => {
+    const updateMarkerColors = () => {
+      // Try updating via materials ref first (more direct)
+      if (markerMaterialsRef.current && markerMaterialsRef.current.length > 0) {
+        markerMaterialsRef.current.forEach((materials) => {
+          if (materials.sphere) {
+            materials.sphere.color.setHex(markerColor);
+          }
+          if (materials.ring) {
+            materials.ring.color.setHex(markerColor);
+          }
+        });
+      }
+      
+      // Also update via marker groups (fallback)
+      if (markerGroupsRef.current && markerGroupsRef.current.length > 0) {
+        markerGroupsRef.current.forEach((markerGroup) => {
+          if (markerGroup && markerGroup.children) {
+            // Update visible marker color (first child is the visible sphere)
+            if (markerGroup.children[0] && markerGroup.children[0].material) {
+              markerGroup.children[0].material.color.setHex(markerColor);
+            }
+            // Update ring color (third child is the ring, second is click area)
+            if (markerGroup.children[2] && markerGroup.children[2].material) {
+              markerGroup.children[2].material.color.setHex(markerColor);
+            }
+          }
+        });
+      }
+    };
+    
+    // Small delay to ensure markers are created
+    const timeoutId = setTimeout(updateMarkerColors, 50);
+    return () => clearTimeout(timeoutId);
+  }, [markerColor]);
+
+  // Toggle favorite
+  const toggleFavorite = (station) => {
+    const isFavorite = favorites.some(fav => fav.streamUrl === station.streamUrl);
+    if (isFavorite) {
+      setFavorites(favorites.filter(fav => fav.streamUrl !== station.streamUrl));
+    } else {
+      setFavorites([...favorites, station]);
+    }
+  };
+
+  // Check if current station is favorite
+  const isFavorite = selectedCountry && favorites.some(fav => fav.streamUrl === selectedCountry.streamUrl);
+
+  // Play favorite station
+  const playFavorite = (station) => {
+    if (isLocked) return;
+    setSelectedCountry(station);
+    setShowInfoPanel(true);
+    setIsPlaying(true);
+    setShowFavorites(false);
+    setHistory(prev => {
+      const newHistory = [station, ...prev.filter(h => h.streamUrl !== station.streamUrl)].slice(0, 50);
+      return newHistory;
+    });
+  };
+
+  // Toggle lock station
+  const toggleLock = () => {
+    setIsLocked(!isLocked);
+    isLockedRef.current = !isLockedRef.current;
+  };
+
+  // Update lock ref when state changes
+  useEffect(() => {
+    isLockedRef.current = isLocked;
+  }, [isLocked]);
+
+  // Surprise me - random station and camera position
+  const surpriseMe = () => {
+    if (isLocked) return;
+    const randomStation = radioStations[Math.floor(Math.random() * radioStations.length)];
+    
+    setSelectedCountry(randomStation);
+    setShowInfoPanel(true);
+    setIsPlaying(true);
+    setHistory(prev => {
+      const newHistory = [randomStation, ...prev.filter(h => h.streamUrl !== randomStation.streamUrl)].slice(0, 50);
+      return newHistory;
+    });
+    
+    // Scroll to station
+    scrollToStation(randomStation.lat, randomStation.lon);
+  };
+
+  // Play from history
+  const playFromHistory = (station) => {
+    if (isLocked) return;
+    
+    setSelectedCountry(station);
+    setShowInfoPanel(true);
+    setIsPlaying(true);
+    setShowHistory(false);
+    setHistory(prev => {
+      const newHistory = [station, ...prev.filter(h => h.streamUrl !== station.streamUrl)].slice(0, 50);
+      return newHistory;
+    });
+    
+    // Scroll to station
+    scrollToStation(station.lat, station.lon);
+  };
+
+  // Schedule alarm
+  const scheduleAlarm = (station, time) => {
+    const alarm = {
+      id: Date.now(),
+      station,
+      time,
+      enabled: true
+    };
+    setAlarms([...alarms, alarm]);
+    setShowAlarmModal(false);
+  };
+
+  // Delete alarm
+  const deleteAlarm = (alarmId) => {
+    setAlarms(alarms.filter(alarm => alarm.id !== alarmId));
+  };
+
+  // Toggle alarm enabled state
+  const toggleAlarm = (alarmId) => {
+    setAlarms(alarms.map(alarm => 
+      alarm.id === alarmId ? { ...alarm, enabled: !alarm.enabled } : alarm
+    ));
+  };
+
+  // Get time until alarm
+  const getTimeUntilAlarm = (alarmTime) => {
+    const now = new Date();
+    const [hours, minutes] = alarmTime.split(':').map(Number);
+    const alarmDate = new Date();
+    alarmDate.setHours(hours, minutes, 0, 0);
+    
+    // If alarm time has passed today, set for tomorrow
+    if (alarmDate < now) {
+      alarmDate.setDate(alarmDate.getDate() + 1);
+    }
+    
+    const diff = alarmDate - now;
+    const hoursUntil = Math.floor(diff / (1000 * 60 * 60));
+    const minutesUntil = Math.floor((diff % (1000 * 60 * 60)) / (1000 * 60));
+    
+    if (hoursUntil > 0) {
+      return `${hoursUntil}h ${minutesUntil}m`;
+    } else {
+      return `${minutesUntil}m`;
+    }
+  };
+
+  // Check alarms
+  useEffect(() => {
+    const checkAlarms = () => {
+      const now = new Date();
+      const currentTime = now.getHours() * 60 + now.getMinutes();
+      
+      alarms.forEach(alarm => {
+        if (!alarm.enabled) return;
+        
+        const [hours, minutes] = alarm.time.split(':').map(Number);
+        const alarmTime = hours * 60 + minutes;
+        
+        if (currentTime === alarmTime && !isPlaying) {
+          setSelectedCountry(alarm.station);
+          setShowInfoPanel(true);
+          setIsPlaying(true);
+          setHistory(prev => {
+            const newHistory = [alarm.station, ...prev.filter(h => h.streamUrl !== alarm.station.streamUrl)].slice(0, 50);
+            return newHistory;
+          });
+        }
+      });
+    };
+    
+    const interval = setInterval(checkAlarms, 60000); // Check every minute
+    return () => clearInterval(interval);
+  }, [alarms, isPlaying]);
+
+  // Handle play/pause
+  useEffect(() => {
+    if (!audioRef.current || !selectedCountry) return;
+    
+    if (isPlaying && hasStarted) {
+      // Clear any previous errors when starting to play
+      setAudioError(null);
+      setIsAttemptingPlay(true);
+      
+      if (audioRef.current.src !== selectedCountry.streamUrl) {
+        audioRef.current.src = selectedCountry.streamUrl;
+      }
+      audioRef.current.play().catch(err => {
+        console.error('Play error:', err);
+        setAudioError('Failed to play audio. Please check your connection.');
+        setIsPlaying(false);
+        setIsAttemptingPlay(false);
+      });
+    } else {
+      audioRef.current.pause();
+      setIsAttemptingPlay(false);
+    }
+  }, [isPlaying, selectedCountry, hasStarted]);
+
+  // Song detection effect
+  useEffect(() => {
+    if (isPlaying && hasStarted && audioRef.current && selectedCountry) {
+      // Start song detection
+      setIsDetectingSong(true);
+      setDetectedSong(null); // Clear previous detection
+      
+      const handleSongDetected = (song) => {
+        setDetectedSong(song);
+        setIsDetectingSong(false);
+      };
+      
+      songDetectionService.startDetection(audioRef.current, handleSongDetected);
+      
+      return () => {
+        // Stop detection when component unmounts or stops playing
+        songDetectionService.stopDetection();
+        setIsDetectingSong(false);
+      };
+    } else {
+      // Stop detection when not playing
+      songDetectionService.stopDetection();
+      setIsDetectingSong(false);
+    }
+  }, [isPlaying, hasStarted, selectedCountry]);
+
   // Update current time every second
   useEffect(() => {
     const timer = setInterval(() => {
@@ -20,109 +469,11 @@ const Earth3D = () => {
     return () => clearInterval(timer);
   }, []);
 
-  // ASEAN countries with capital coordinates and station info
-  const aseanCountries = [
-    { 
-      name: 'Indonesia', 
-      capital: 'Jakarta', 
-      lat: -6.2088, 
-      lon: 106.8456,
-      station: 'Radio Republik Indonesia',
-      frequency: '88.8 FM',
-      address: 'Jl. Merdeka Barat 9, Jakarta',
-      genre: 'News & Traditional Music'
-    },
-    { 
-      name: 'Thailand', 
-      capital: 'Bangkok', 
-      lat: 13.7563, 
-      lon: 100.5018,
-      station: 'Radio Thailand',
-      frequency: '91.5 FM',
-      address: 'Rama I Rd, Pathum Wan, Bangkok',
-      genre: 'Pop & Luk Thung'
-    },
-    { 
-      name: 'Vietnam', 
-      capital: 'Hanoi', 
-      lat: 21.0285, 
-      lon: 105.8542,
-      station: 'Voice of Vietnam',
-      frequency: '100.0 FM',
-      address: '58 Quán Sứ, Hoàn Kiếm, Hanoi',
-      genre: 'Traditional & Contemporary'
-    },
-    { 
-      name: 'Philippines', 
-      capital: 'Manila', 
-      lat: 14.5995, 
-      lon: 120.9842,
-      station: 'ABS-CBN Radio',
-      frequency: '90.7 FM',
-      address: 'Mother Ignacia Ave, Quezon City',
-      genre: 'OPM & Talk Radio'
-    },
-    { 
-      name: 'Malaysia', 
-      capital: 'Kuala Lumpur', 
-      lat: 3.1390, 
-      lon: 101.6869,
-      station: 'Radio Televisyen Malaysia',
-      frequency: '92.9 FM',
-      address: 'Angkasapuri, Kuala Lumpur',
-      genre: 'Pop & Traditional'
-    },
-    { 
-      name: 'Singapore', 
-      capital: 'Singapore', 
-      lat: 1.3521, 
-      lon: 103.8198,
-      station: 'Mediacorp Radio',
-      frequency: '93.3 FM',
-      address: '1 Stars Ave, Singapore',
-      genre: 'International Hits'
-    },
-    { 
-      name: 'Myanmar', 
-      capital: 'Naypyidaw', 
-      lat: 19.7633, 
-      lon: 96.0785,
-      station: 'Myanmar Radio',
-      frequency: '87.9 FM',
-      address: 'Naypyidaw, Myanmar',
-      genre: 'Traditional Burmese Music'
-    },
-    { 
-      name: 'Cambodia', 
-      capital: 'Phnom Penh', 
-      lat: 11.5564, 
-      lon: 104.9282,
-      station: 'National Radio of Cambodia',
-      frequency: '95.0 FM',
-      address: 'Phnom Penh, Cambodia',
-      genre: 'Khmer Music & News'
-    },
-    { 
-      name: 'Laos', 
-      capital: 'Vientiane', 
-      lat: 17.9757, 
-      lon: 102.6331,
-      station: 'Lao National Radio',
-      frequency: '96.0 FM',
-      address: 'Vientiane, Laos',
-      genre: 'Traditional Lao Music'
-    },
-    { 
-      name: 'Brunei', 
-      capital: 'Bandar Seri Begawan', 
-      lat: 4.9031, 
-      lon: 114.9398,
-      station: 'Radio Television Brunei',
-      frequency: '94.1 FM',
-      address: 'Bandar Seri Begawan, Brunei',
-      genre: 'Islamic & Malay Music'
-    }
-  ];
+  // Handle start button click
+  const handleStart = () => {
+    setHasStarted(true);
+  };
+
 
   // Convert lat/lon to 3D coordinates on a sphere
   const latLonToVector3 = (lat, lon, radius) => {
@@ -136,27 +487,71 @@ const Earth3D = () => {
     return new THREE.Vector3(x, y, z);
   };
 
-  // Create a green radio station marker with invisible click area
-  const createMarker = (country, earthRadius) => {
+  // Scroll camera to station - simple working version
+  const scrollToStation = (lat, lon) => {
+    setTimeout(() => {
+      if (!controlsRef.current) return;
+      
+      const camera = cameraRef.current || controlsRef.current.object;
+      if (!camera) return;
+      
+      // Get station position
+      const stationPos = latLonToVector3(lat, lon, 2);
+      
+      // Position camera opposite to station (so it sees station when looking at center)
+      const dist = 4.5;
+      const dir = stationPos.clone().normalize();
+      const targetPos = dir.multiplyScalar(-dist);
+      
+      // Disable controls
+      const wasEnabled = controlsRef.current.enabled;
+      controlsRef.current.enabled = false;
+      controlsRef.current.target.set(0, 0, 0);
+      
+      // Animate
+      const start = camera.position.clone();
+      let t = 0;
+      
+      const anim = () => {
+        t += 0.02;
+        if (t < 1) {
+          camera.position.lerpVectors(start, targetPos, t);
+          camera.lookAt(0, 0, 0);
+          requestAnimationFrame(anim);
+        } else {
+          camera.position.copy(targetPos);
+          camera.lookAt(0, 0, 0);
+          controlsRef.current.target.set(0, 0, 0);
+          controlsRef.current.enabled = wasEnabled;
+          controlsRef.current.update();
+        }
+      };
+      
+      anim();
+    }, 100);
+  };
+
+  // Create a radio station marker with invisible click area
+  const createMarker = (country, earthRadius, color = markerColor) => {
     const position = latLonToVector3(country.lat, country.lon, earthRadius + 0.05);
     
     // Create a group to hold all marker components
     const markerGroup = new THREE.Group();
     markerGroup.position.copy(position);
     
-    // Create VISIBLE green sphere marker (small)
-    const markerGeometry = new THREE.SphereGeometry(0.025, 16, 16);
+    // Create VISIBLE sphere marker (larger and more visible)
+    const markerGeometry = new THREE.SphereGeometry(0.04, 16, 16);
     const markerMaterial = new THREE.MeshBasicMaterial({ 
-      color: 0x4CAF50,
+      color: color,
       transparent: true,
-      opacity: 0.9
+      opacity: 1.0
     });
     
     const visibleMarker = new THREE.Mesh(markerGeometry, markerMaterial);
     markerGroup.add(visibleMarker);
     
     // Create INVISIBLE click area (larger for easier clicking)
-    const clickGeometry = new THREE.SphereGeometry(0.06, 8, 8); // Larger invisible sphere
+    const clickGeometry = new THREE.SphereGeometry(0.08, 8, 8); // Larger invisible sphere
     const clickMaterial = new THREE.MeshBasicMaterial({ 
       color: 0x00ff00,
       transparent: true,
@@ -167,15 +562,16 @@ const Earth3D = () => {
     const clickArea = new THREE.Mesh(clickGeometry, clickMaterial);
     markerGroup.add(clickArea);
     
-    // Add a static pulse ring (no animation)
-    const pulseGeometry = new THREE.SphereGeometry(0.04, 8, 8);
+    // Add a visible ring around the marker
+    const pulseGeometry = new THREE.RingGeometry(0.05, 0.07, 16);
     const pulseMaterial = new THREE.MeshBasicMaterial({ 
-      color: 0x4CAF50,
+      color: color,
       transparent: true,
-      opacity: 0.3,
+      opacity: 0.5,
       side: THREE.DoubleSide
     });
     const pulseRing = new THREE.Mesh(pulseGeometry, pulseMaterial);
+    pulseRing.rotation.x = Math.PI / 2; // Orient ring perpendicular to marker
     pulseRing.userData.pulse = false; // No pulse animation
     markerGroup.add(pulseRing);
     
@@ -206,6 +602,7 @@ const Earth3D = () => {
       1000
     );
     camera.position.z = 5;
+    cameraRef.current = camera;
 
     const renderer = new THREE.WebGLRenderer({ 
       antialias: true,
@@ -247,19 +644,90 @@ const Earth3D = () => {
         const earth = new THREE.Mesh(earthGeometry, earthMaterial);
         scene.add(earth);
         
-        // Create ASEAN markers
+        // Get current marker color from localStorage or state
+        const getCurrentMarkerColor = () => {
+          const saved = localStorage.getItem('radioGardenMarkerColor');
+          if (saved) {
+            const parsed = parseInt(saved, 16);
+            if (!isNaN(parsed)) {
+              return parsed;
+            }
+          }
+          return markerColor;
+        };
+        
+        // Create ASEAN markers - use current color from localStorage or state
         const markerGroups = [];
         const clickAreas = []; // Separate array for click detection
+        const currentColor = getCurrentMarkerColor(); // Get actual current color
         
-        aseanCountries.forEach(country => {
-          const { markerGroup, clickArea } = createMarker(country, earthRadius);
+        const markerMaterials = [];
+        radioStations.forEach(station => {
+          const { markerGroup, clickArea } = createMarker(station, earthRadius, currentColor);
           earth.add(markerGroup);
           markerGroups.push(markerGroup);
           clickAreas.push(clickArea);
+          
+          // Store materials for easy color updates
+          if (markerGroup.children[0] && markerGroup.children[0].material) {
+            markerMaterials.push({
+              sphere: markerGroup.children[0].material,
+              ring: markerGroup.children[2]?.material
+            });
+          }
         });
+        
+        // Store marker groups and materials references for color updates
+        markerGroupsRef.current = markerGroups;
+        markerMaterialsRef.current = markerMaterials;
+        
+        // Color will be applied by the useEffect that watches markerColor
+        // This ensures it uses the latest state value, not a captured closure value
 
-        // NO STARS BACKGROUND - completely removed
-        // Everything is now static
+        // Create stars background
+        const createStars = () => {
+          const starsGeometry = new THREE.BufferGeometry();
+          const starsCount = 5000;
+          const positions = new Float32Array(starsCount * 3);
+          
+          for (let i = 0; i < starsCount * 3; i += 3) {
+            // Random position in a sphere around the scene
+            const radius = 50 + Math.random() * 200;
+            const theta = Math.random() * Math.PI * 2;
+            const phi = Math.acos(Math.random() * 2 - 1);
+            
+            positions[i] = radius * Math.sin(phi) * Math.cos(theta);
+            positions[i + 1] = radius * Math.sin(phi) * Math.sin(theta);
+            positions[i + 2] = radius * Math.cos(phi);
+          }
+          
+          starsGeometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+          
+          const starsMaterial = new THREE.PointsMaterial({
+            color: 0xffffff,
+            size: 0.5,
+            transparent: true,
+            opacity: 0.8,
+            sizeAttenuation: true
+          });
+          
+          const stars = new THREE.Points(starsGeometry, starsMaterial);
+          starsRef.current = stars;
+          
+          // Store in scene for cleanup
+          scene.userData.stars = stars;
+          
+          // Check localStorage directly (state might not be updated yet)
+          const savedShowStars = localStorage.getItem('radioGardenShowStars');
+          const shouldShow = savedShowStars !== null ? savedShowStars === 'true' : false;
+          
+          // Only add stars if they should be shown
+          if (shouldShow) {
+            scene.add(stars);
+          }
+        };
+        
+        createStars();
 
         // Add orbit controls with NO auto-rotation
         const controls = new OrbitControls(camera, renderer.domElement);
@@ -289,21 +757,47 @@ const Earth3D = () => {
           if (intersects.length > 0) {
             const clickArea = intersects[0].object;
             const countryData = clickArea.userData.countryData;
+            
+            // Check if locked
+            if (isLockedRef.current) {
+            // Visual feedback that station is locked
+            if (clickArea.userData.visibleMarker) {
+              // Get current color from the marker itself
+              const originalColor = clickArea.userData.visibleMarker.material.color.getHex();
+              clickArea.userData.visibleMarker.material.color.setHex(0xff6b6b);
+              setTimeout(() => {
+                clickArea.userData.visibleMarker.material.color.setHex(originalColor);
+              }, 300);
+            }
+              return;
+            }
+            
             setSelectedCountry(countryData);
             setShowInfoPanel(true);
-            setIsPlaying(true);
+            if (hasStarted) {
+              setIsPlaying(true);
+            }
+            // Add to history
+            setHistory(prev => {
+              const newHistory = [countryData, ...prev.filter(h => h.streamUrl !== countryData.streamUrl)].slice(0, 50);
+              return newHistory;
+            });
             
             // Visual feedback on the visible marker
             if (clickArea.userData.visibleMarker) {
+              // Get current color from the marker itself
+              const originalColor = clickArea.userData.visibleMarker.material.color.getHex();
               clickArea.userData.visibleMarker.material.color.setHex(0xffffff);
               setTimeout(() => {
-                clickArea.userData.visibleMarker.material.color.setHex(0x4CAF50);
+                clickArea.userData.visibleMarker.material.color.setHex(originalColor);
               }, 300);
             }
           } else {
-            setShowInfoPanel(false);
-            setIsPlaying(false);
-            setSelectedCountry(null);
+            // Don't clear selectedCountry or stop playing when clicking empty space
+            // Just close the panel if it's open
+            if (showInfoPanel) {
+              setShowInfoPanel(false);
+            }
           }
         };
 
@@ -354,19 +848,29 @@ const Earth3D = () => {
         scene.userData.markerGroups = markerGroups;
         scene.userData.clickAreas = clickAreas;
         scene.userData.controls = controls;
+        scene.userData.camera = camera;
         scene.userData.earthTexture = texture;
         scene.userData.clickHandler = handleClick;
         scene.userData.mouseMoveHandler = handleMouseMove;
+        sceneRef.current = scene;
+        controlsRef.current = controls;
 
-        // Main animation loop - NO ANIMATIONS AT ALL
+        // Main animation loop
         const animate = () => {
           scene.userData.animationId = requestAnimationFrame(animate);
           
           // NO earth rotation - completely stationary
           // NO pulse animation - completely static
-          // NO star animation - removed entirely
           
-          controls.update();
+          // Optional: Slow rotation of stars for subtle movement
+          if (starsRef.current && showStars) {
+            starsRef.current.rotation.y += 0.0001;
+          }
+          
+          // Only update controls if they're enabled (prevents interference with camera animation)
+          if (controls.enabled) {
+            controls.update();
+          }
           renderer.render(scene, camera);
         };
         
@@ -445,16 +949,41 @@ const Earth3D = () => {
     });
   };
 
-  // Close info panel
+  // Close info panel (but keep audio playing)
   const handleCloseInfo = () => {
     setShowInfoPanel(false);
-    setSelectedCountry(null);
-    setIsPlaying(false);
+    // Don't stop audio or clear selectedCountry - keep playing in background
+  };
+
+  // Handle play/pause button
+  const handlePlayPause = () => {
+    if (!hasStarted) {
+      setHasStarted(true);
+      setIsPlaying(true);
+    } else {
+      setIsPlaying(!isPlaying);
+    }
   };
 
   return (
     <div className="earth3d-container">
       <div className="earth3d-canvas" ref={mountRef}></div>
+      
+      {/* Play to Start Overlay */}
+      {!hasStarted && !loading && (
+        <div className="play-to-start-overlay">
+          <div className="play-to-start-content">
+            <h1 className="play-to-start-title">Radio Garden</h1>
+            <p className="play-to-start-subtitle">Explore live radio stations around the world</p>
+            <button className="play-to-start-button" onClick={handleStart}>
+              <svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <path d="M5 3L19 12L5 21V3Z" fill="currentColor"/>
+              </svg>
+              <span>Press to Start</span>
+            </button>
+          </div>
+        </div>
+      )}
       
       {loading && (
         <div className="loading-overlay">
@@ -470,17 +999,445 @@ const Earth3D = () => {
           <div className="mini-current-date">{formatDate(currentTime)}</div>
         </div>
         <div className="mini-title">
-          <span className="mini-radio-icon">🌍</span>
-          <span className="title-text">ASEAN Radio Network</span>
+          <span className="title-text">Radio Garden</span>
         </div>
       </div>
+
+      {/* Favorites Button */}
+      <button 
+        className="favorites-button"
+        onClick={() => setShowFavorites(!showFavorites)}
+        title="Favorites"
+      >
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <path 
+            d="M12 21.35L10.55 20.03C5.4 15.36 2 12.28 2 8.5C2 5.42 4.42 3 7.5 3C9.24 3 10.91 3.81 12 5.09C13.09 3.81 14.76 3 16.5 3C19.58 3 22 5.42 22 8.5C22 12.28 18.6 15.36 13.45 20.04L12 21.35Z" 
+            stroke="currentColor" 
+            strokeWidth="2" 
+            strokeLinecap="round" 
+            strokeLinejoin="round"
+            fill={favorites.length > 0 ? 'currentColor' : 'none'}
+          />
+        </svg>
+        {favorites.length > 0 && <span className="favorites-count">{favorites.length}</span>}
+      </button>
+
+      {/* Lock Station Button */}
+      <button 
+        className={`feature-button lock-button ${isLocked ? 'active' : ''}`}
+        onClick={toggleLock}
+        title={isLocked ? 'Unlock Station' : 'Lock Station'}
+        style={{ top: '180px' }}
+      >
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+          {isLocked ? (
+            <>
+              <rect x="3" y="11" width="18" height="11" rx="2" stroke="currentColor" strokeWidth="2" fill="currentColor" fillOpacity="0.3"/>
+              <path d="M7 11V7C7 4.79086 8.79086 3 11 3H13C15.2091 3 17 4.79086 17 7V11" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
+            </>
+          ) : (
+            <>
+              <rect x="3" y="11" width="18" height="11" rx="2" stroke="currentColor" strokeWidth="2"/>
+              <path d="M7 11V7C7 4.79086 8.79086 3 11 3H13C15.2091 3 17 4.79086 17 7V11" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
+            </>
+          )}
+        </svg>
+      </button>
+
+      {/* Schedule/Alarm Button */}
+      <button 
+        className="feature-button alarm-button"
+        onClick={() => setShowAlarms(!showAlarms)}
+        title="Scheduled Alarms"
+        style={{ top: '240px' }}
+      >
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="2"/>
+          <path d="M12 6V12L16 14" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
+        </svg>
+        {alarms.length > 0 && <span className="feature-count">{alarms.length}</span>}
+      </button>
+
+     {/* Surprise Me Button */}
+     <button 
+        className="feature-button surprise-button"
+        onClick={surpriseMe}
+        title="Surprise Me"
+        style={{ top: '300px' }}
+        disabled={isLocked}
+      >
+        <img 
+          src="https://unpkg.com/lucide-static@latest/icons/sparkles.svg" 
+          alt="Surprise" 
+          style={{ width: '20px', height: '20px', filter: 'invert(58%) sepia(41%) saturate(601%) hue-rotate(76deg) brightness(92%) contrast(89%)' }} 
+        />
+      </button>
+
+      {/* History/Travel Log Button */}
+      <button 
+        className="feature-button history-button"
+        onClick={() => setShowHistory(!showHistory)}
+        title="History / Travel Log"
+        style={{ top: '360px' }}
+      >
+        <img 
+          src="https://unpkg.com/lucide-static@latest/icons/scroll-text.svg" 
+          alt="History" 
+          style={{ width: '20px', height: '20px', filter: 'invert(58%) sepia(41%) saturate(601%) hue-rotate(76deg) brightness(92%) contrast(89%)' }} 
+        />
+        {history.length > 0 && <span className="feature-count">{history.length}</span>}
+      </button>
+
+      {/* Customization/Color Picker Button */}
+      <button 
+        className="feature-button customization-button"
+        onClick={() => setShowColorPicker(!showColorPicker)}
+        title="Customize"
+        style={{ top: '420px' }}
+      >
+        <img 
+          src="https://unpkg.com/lucide-static@latest/icons/palette.svg" 
+          alt="Customize" 
+          style={{ width: '20px', height: '20px', filter: 'invert(58%) sepia(41%) saturate(601%) hue-rotate(76deg) brightness(92%) contrast(89%)' }} 
+        />
+      </button>
+
+      {/* Color Picker Menu */}
+      {showColorPicker && (
+        <div className="color-picker-menu">
+          <div className="favorites-menu-header">
+            <h3>Customization</h3>
+            <button 
+              className="favorites-close-btn"
+              onClick={() => setShowColorPicker(false)}
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <path d="M18 6L6 18M6 6L18 18" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
+              </svg>
+            </button>
+          </div>
+          
+          {/* Stars Toggle */}
+          <div className="customization-section">
+            <div className="customization-label">Background Stars</div>
+            <button 
+              className={`stars-toggle ${showStars ? 'active' : ''}`}
+              onClick={() => setShowStars(!showStars)}
+              title={showStars ? 'Hide Stars' : 'Show Stars'}
+            >
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                {showStars ? (
+                  <path d="M12 2L15.09 8.26L22 9.27L17 14.14L18.18 21.02L12 17.77L5.82 21.02L7 14.14L2 9.27L8.91 8.26L12 2Z" fill="currentColor" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+                ) : (
+                  <path d="M12 2L15.09 8.26L22 9.27L17 14.14L18.18 21.02L12 17.77L5.82 21.02L7 14.14L2 9.27L8.91 8.26L12 2Z" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" fill="none"/>
+                )}
+              </svg>
+              <span>{showStars ? 'On' : 'Off'}</span>
+            </button>
+          </div>
+          
+          {/* Marker Colors */}
+          <div className="customization-section">
+            <div className="customization-label">Marker Colors</div>
+            <div className="color-options">
+            <button 
+              className={`color-option ${markerColor === 0x4CAF50 ? 'active' : ''}`}
+              onClick={() => setMarkerColor(0x4CAF50)}
+              style={{ backgroundColor: '#4CAF50' }}
+              title="Green (Default)"
+            >
+              {markerColor === 0x4CAF50 && (
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                  <path d="M20 6L9 17L4 12" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+                </svg>
+              )}
+            </button>
+            <button 
+              className={`color-option ${markerColor === 0x2196F3 ? 'active' : ''}`}
+              onClick={() => setMarkerColor(0x2196F3)}
+              style={{ backgroundColor: '#2196F3' }}
+              title="Blue"
+            >
+              {markerColor === 0x2196F3 && (
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                  <path d="M20 6L9 17L4 12" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+                </svg>
+              )}
+            </button>
+            <button 
+              className={`color-option ${markerColor === 0xFF9800 ? 'active' : ''}`}
+              onClick={() => setMarkerColor(0xFF9800)}
+              style={{ backgroundColor: '#FF9800' }}
+              title="Orange"
+            >
+              {markerColor === 0xFF9800 && (
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                  <path d="M20 6L9 17L4 12" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+                </svg>
+              )}
+            </button>
+            <button 
+              className={`color-option ${markerColor === 0x9C27B0 ? 'active' : ''}`}
+              onClick={() => setMarkerColor(0x9C27B0)}
+              style={{ backgroundColor: '#9C27B0' }}
+              title="Purple"
+            >
+              {markerColor === 0x9C27B0 && (
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                  <path d="M20 6L9 17L4 12" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+                </svg>
+              )}
+            </button>
+            <button 
+              className={`color-option ${markerColor === 0xF44336 ? 'active' : ''}`}
+              onClick={() => setMarkerColor(0xF44336)}
+              style={{ backgroundColor: '#F44336' }}
+              title="Red"
+            >
+              {markerColor === 0xF44336 && (
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                  <path d="M20 6L9 17L4 12" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+                </svg>
+              )}
+            </button>
+            <button 
+              className={`color-option ${markerColor === 0x00BCD4 ? 'active' : ''}`}
+              onClick={() => setMarkerColor(0x00BCD4)}
+              style={{ backgroundColor: '#00BCD4' }}
+              title="Cyan"
+            >
+              {markerColor === 0x00BCD4 && (
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                  <path d="M20 6L9 17L4 12" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+                </svg>
+              )}
+            </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Favorites Menu */}
+      {showFavorites && (
+        <div className="favorites-menu">
+          <div className="favorites-menu-header">
+            <h3>Favorites</h3>
+            <button 
+              className="favorites-close-btn"
+              onClick={() => setShowFavorites(false)}
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <path d="M18 6L6 18M6 6L18 18" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
+              </svg>
+            </button>
+          </div>
+          <div className="favorites-list">
+            {favorites.length === 0 ? (
+              <div className="favorites-empty">No favorites yet</div>
+            ) : (
+              favorites.map((station, index) => (
+                <div 
+                  key={index} 
+                  className="favorite-item"
+                  onClick={() => playFavorite(station)}
+                >
+                  <div className="favorite-info">
+                    <div className="favorite-station">{station.station}</div>
+                    <div className="favorite-location">{station.capital}, {station.name}</div>
+                  </div>
+                  <button
+                    className="favorite-remove-btn"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      toggleFavorite(station);
+                    }}
+                  >
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                      <path d="M18 6L6 18M6 6L18 18" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
+                    </svg>
+                  </button>
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* History Menu */}
+      {showHistory && (
+        <div className="history-menu">
+          <div className="favorites-menu-header">
+            <h3>Travel Log</h3>
+            <button 
+              className="favorites-close-btn"
+              onClick={() => setShowHistory(false)}
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <path d="M18 6L6 18M6 6L18 18" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
+              </svg>
+            </button>
+          </div>
+          <div className="favorites-list history-list">
+            {history.length === 0 ? (
+              <div className="favorites-empty">No stations played yet</div>
+            ) : (
+              history.map((station, index) => (
+                <div 
+                  key={index} 
+                  className="favorite-item"
+                  onClick={() => playFromHistory(station)}
+                >
+                  <div className="favorite-info">
+                    <div className="favorite-station">{station.station}</div>
+                    <div className="favorite-location">{station.capital}, {station.name}</div>
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Alarms Menu */}
+      {showAlarms && (
+        <div className="favorites-menu" style={{ top: '300px' }}>
+          <div className="favorites-menu-header">
+            <h3>Scheduled Alarms</h3>
+            <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+              <button 
+                className="favorites-close-btn"
+                onClick={() => setShowAlarmModal(true)}
+                title="Add New Alarm"
+                style={{ width: '28px', height: '28px' }}
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                  <path d="M12 5V19M5 12H19" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
+                </svg>
+              </button>
+              <button 
+                className="favorites-close-btn"
+                onClick={() => setShowAlarms(false)}
+              >
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                  <path d="M18 6L6 18M6 6L18 18" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
+                </svg>
+              </button>
+            </div>
+          </div>
+          <div className="favorites-list">
+            {alarms.length === 0 ? (
+              <div className="favorites-empty">No alarms scheduled</div>
+            ) : (
+              alarms.map((alarm) => (
+                <div 
+                  key={alarm.id} 
+                  className="favorite-item alarm-item"
+                >
+                  <div className="favorite-info" style={{ flex: 1 }}>
+                    <div className="favorite-station" style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                      <button
+                        className="alarm-toggle-btn"
+                        onClick={() => toggleAlarm(alarm.id)}
+                        title={alarm.enabled ? 'Disable' : 'Enable'}
+                      >
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                          {alarm.enabled ? (
+                            <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="2" fill="currentColor" fillOpacity="0.3"/>
+                          ) : (
+                            <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="2"/>
+                          )}
+                        </svg>
+                      </button>
+                      <span>{alarm.station.station}</span>
+                    </div>
+                    <div className="favorite-location">{alarm.station.capital}, {alarm.station.name}</div>
+                    <div style={{ fontSize: '11px', color: 'rgba(255, 255, 255, 0.5)', marginTop: '4px' }}>
+                      {alarm.time} • {getTimeUntilAlarm(alarm.time)} remaining
+                    </div>
+                  </div>
+                  <button
+                    className="favorite-remove-btn"
+                    onClick={() => deleteAlarm(alarm.id)}
+                    title="Delete Alarm"
+                  >
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                      <path d="M18 6L6 18M6 6L18 18" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
+                    </svg>
+                  </button>
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Alarm Modal */}
+      {showAlarmModal && (
+        <div className="alarm-modal-overlay" onClick={() => setShowAlarmModal(false)}>
+          <div className="alarm-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="alarm-modal-header">
+              <h3>Schedule Alarm</h3>
+              <button 
+                className="favorites-close-btn"
+                onClick={() => setShowAlarmModal(false)}
+              >
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                  <path d="M18 6L6 18M6 6L18 18" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
+                </svg>
+              </button>
+            </div>
+            <AlarmForm 
+              selectedStation={selectedCountry}
+              onSchedule={scheduleAlarm}
+              onClose={() => setShowAlarmModal(false)}
+            />
+          </div>
+        </div>
+      )}
       
       {/* Click hint */}
       <div className="click-hint">
         Click on green markers to listen
       </div>
       
-      {/* Info Panel (only shows when station is selected) */}
+      {/* Mini Player (only visible when playing and panel is closed) */}
+      {isPlaying && selectedCountry && !showInfoPanel && (
+        <div className="mini-player" style={{ position: 'fixed', zIndex: 9999 }}>
+          <div className="mini-player-info">
+            <div className="mini-player-station">{selectedCountry.station}</div>
+            <div className="mini-player-location">{selectedCountry.capital}</div>
+          </div>
+          <div className="mini-player-controls">
+            <button 
+              className="mini-player-play-btn"
+              onClick={handlePlayPause}
+              title={isPlaying ? 'Pause' : 'Play'}
+            >
+              {isPlaying ? (
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                  <path d="M10 4H6V20H10V4Z" fill="currentColor"/>
+                  <path d="M18 4H14V20H18V4Z" fill="currentColor"/>
+                </svg>
+              ) : (
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                  <path d="M5 3L19 12L5 21V3Z" fill="currentColor"/>
+                </svg>
+              )}
+            </button>
+            <button 
+              className="mini-player-expand-btn"
+              onClick={() => setShowInfoPanel(true)}
+              title="Show Details"
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <path d="M12 8V16M8 12H16" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
+              </svg>
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Info Panel (only shows when station is selected and panel is open) */}
       {showInfoPanel && selectedCountry && (
         <div className="radio-info-panel">
           <div className="info-panel-header">
@@ -530,9 +1487,10 @@ const Earth3D = () => {
               </button>
               
               <button 
-                className={`player-btn play-btn ${isPlaying ? 'playing' : ''}`}
-                onClick={() => setIsPlaying(!isPlaying)}
+                className={`player-btn play-btn ${isPlaying ? 'playing' : ''} ${isLoadingAudio ? 'loading' : ''}`}
+                onClick={handlePlayPause}
                 title={isPlaying ? 'Pause' : 'Play'}
+                disabled={isLoadingAudio}
               >
                 {isPlaying ? (
                   <svg width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
@@ -556,29 +1514,63 @@ const Earth3D = () => {
               </button>
               
               <button 
-                className="player-btn fav-btn"
-                title="Add to Favorites"
+                className={`player-btn fav-btn ${isFavorite ? 'active' : ''}`}
+                onClick={() => selectedCountry && toggleFavorite(selectedCountry)}
+                title={isFavorite ? 'Remove from Favorites' : 'Add to Favorites'}
               >
                 <svg width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-                  <path d="M12 21.35L10.55 20.03C5.4 15.36 2 12.28 2 8.5C2 5.42 4.42 3 7.5 3C9.24 3 10.91 3.81 12 5.09C13.09 3.81 14.76 3 16.5 3C19.58 3 22 5.42 22 8.5C22 12.28 18.6 15.36 13.45 20.04L12 21.35Z" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+                  <path 
+                    d="M12 21.35L10.55 20.03C5.4 15.36 2 12.28 2 8.5C2 5.42 4.42 3 7.5 3C9.24 3 10.91 3.81 12 5.09C13.09 3.81 14.76 3 16.5 3C19.58 3 22 5.42 22 8.5C22 12.28 18.6 15.36 13.45 20.04L12 21.35Z" 
+                    stroke="currentColor" 
+                    strokeWidth="2" 
+                    strokeLinecap="round" 
+                    strokeLinejoin="round"
+                    fill={isFavorite ? 'currentColor' : 'none'}
+                  />
                 </svg>
               </button>
             </div>
             
+            {audioError && (
+              <div className="audio-error-message">
+                <span>⚠️</span> {audioError}
+              </div>
+            )}
+            {isLoadingAudio && (
+              <div className="audio-loading-message">
+                <div className="audio-loading-spinner"></div>
+                <span>Loading stream...</span>
+              </div>
+            )}
             <div className="signal-section">
               <div className="signal-info">
                 <div className="info-label">Signal Strength</div>
                 <div className="signal-bars-large">
-                  <div className="signal-bar-large active"></div>
-                  <div className="signal-bar-large active"></div>
-                  <div className="signal-bar-large active"></div>
-                  <div className="signal-bar-large"></div>
-                  <div className="signal-bar-large"></div>
+                  <div className={`signal-bar-large ${isPlaying ? 'active' : ''}`}></div>
+                  <div className={`signal-bar-large ${isPlaying ? 'active' : ''}`}></div>
+                  <div className={`signal-bar-large ${isPlaying ? 'active' : ''}`}></div>
+                  <div className={`signal-bar-large ${isPlaying ? 'active' : ''}`}></div>
+                  <div className={`signal-bar-large ${isPlaying ? 'active' : ''}`}></div>
                 </div>
               </div>
               <div className="now-playing">
                 <div className="info-label">Now Playing</div>
-                <div className="track-name">{selectedCountry.genre.split('&')[0].trim()} Mix</div>
+                {detectedSong ? (
+                  <div className="detected-song">
+                    <div className="track-name">{detectedSong.title}</div>
+                    <div className="track-artist">{detectedSong.artist}</div>
+                    {detectedSong.album && (
+                      <div className="track-album">{detectedSong.album}</div>
+                    )}
+                  </div>
+                ) : isDetectingSong ? (
+                  <div className="detecting-song">
+                    <div className="detecting-spinner"></div>
+                    <span>Detecting song...</span>
+                  </div>
+                ) : (
+                  <div className="track-name">{selectedCountry.genre.split('&')[0].trim()} Mix</div>
+                )}
               </div>
             </div>
           </div>
