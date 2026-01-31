@@ -70,6 +70,12 @@
   box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
 }
 
+.header-logo {
+  height: 60px;
+  width: auto;
+  object-fit: contain;
+}
+
 .mini-time-display {
   text-align: center;
   font-family: 'Poppins', sans-serif;
@@ -400,9 +406,9 @@
 .color-picker-menu {
   position: fixed;
   left: 80px;
-  top: 420px;
+  top: 280px;
   width: 280px;
-  max-height: calc(100vh - 440px);
+  max-height: calc(100vh - 320px);
   background: rgba(20, 20, 30, 0.7);
   backdrop-filter: blur(20px);
   -webkit-backdrop-filter: blur(20px);
@@ -691,6 +697,17 @@
 .play-to-start-content {
   text-align: center;
   z-index: 10;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.play-to-start-logo {
+  width: 120px;
+  height: auto;
+  margin-bottom: 20px;
+  filter: drop-shadow(0 0 20px rgba(76, 175, 80, 0.4));
+  animation: float 6s ease-in-out infinite;
 }
 
 .play-to-start-title {
@@ -1290,5 +1307,17 @@
   .player-btn {
     width: 48px;
     height: 48px;
+  }
+}
+
+@keyframes float {
+  0% {
+    transform: translateY(0px);
+  }
+  50% {
+    transform: translateY(-10px);
+  }
+  100% {
+    transform: translateY(0px);
   }
 }

@@ -1,14 +1,16 @@
 import React, { useRef, useEffect, useState } from 'react';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls';
-import { radioStations } from './radioStations';
+import Hls from 'hls.js';
+import { getStations, fallbackStations } from './radioStations';
 import songDetectionService from './songDetection';
+import StationList from './StationList';
+import radiologo from './assets/radiologo.png';
 import './Earth3D.css';
 
-// Alarm Form Component
-const AlarmForm = ({ selectedStation, onSchedule, onClose }) => {
+const AlarmForm = ({ stations, selectedStation, onSchedule, onClose }) => {
   const [time, setTime] = useState('');
-  const [selectedStationForAlarm, setSelectedStationForAlarm] = useState(selectedStation || radioStations[0]);
+  const [selectedStationForAlarm, setSelectedStationForAlarm] = useState(selectedStation || stations[0]);
 
   const handleSubmit = (e) => {
     e.preventDefault();
@@ -24,12 +26,12 @@ const AlarmForm = ({ selectedStation, onSchedule, onClose }) => {
         <select 
           value={selectedStationForAlarm?.streamUrl || ''} 
           onChange={(e) => {
-            const station = radioStations.find(s => s.streamUrl === e.target.value);
+            const station = stations.find(s => s.streamUrl === e.target.value);
             setSelectedStationForAlarm(station);
           }}
           className="alarm-select"
         >
-          {radioStations.map((station, index) => (
+          {stations.map((station, index) => (
             <option key={index} value={station.streamUrl}>
               {station.station} - {station.capital}, {station.name}
             </option>
@@ -57,9 +59,25 @@ const AlarmForm = ({ selectedStation, onSchedule, onClose }) => {
 const Earth3D = () => {
   const mountRef = useRef(null);
   const audioRef = useRef(null);
+  const hlsRef = useRef(null);
+  const [stations, setStations] = useState([]);
+  const [stationsLoaded, setStationsLoaded] = useState(false);
   const [loading, setLoading] = useState(true);
   const [loadingProgress, setLoadingProgress] = useState(0);
   const [selectedCountry, setSelectedCountry] = useState(null);
+
+  useEffect(() => {
+    const initStations = async () => {
+      const fetchedStations = await getStations();
+      if (fetchedStations.length > 0) {
+        setStations(fetchedStations);
+      } else {
+        setStations(fallbackStations);
+      }
+      setStationsLoaded(true);
+    };
+    initStations();
+  }, []);
   const [currentTime, setCurrentTime] = useState(new Date());
   const [isPlaying, setIsPlaying] = useState(false);
   const [showInfoPanel, setShowInfoPanel] = useState(false);
@@ -68,6 +86,7 @@ const Earth3D = () => {
   const [audioError, setAudioError] = useState(null);
   const [favorites, setFavorites] = useState([]);
   const [showFavorites, setShowFavorites] = useState(false);
+  const [showStationList, setShowStationList] = useState(false);
   const [isAttemptingPlay, setIsAttemptingPlay] = useState(false);
   const [isLocked, setIsLocked] = useState(false);
   const [history, setHistory] = useState([]);
@@ -84,6 +103,11 @@ const Earth3D = () => {
     const saved = localStorage.getItem('radioGardenShowStars');
     return saved !== null ? saved === 'true' : false;
   });
+  // Initialize showGlow from localStorage
+  const [showGlow, setShowGlow] = useState(() => {
+    const saved = localStorage.getItem('radioGardenShowGlow');
+    return saved !== null ? saved === 'true' : false;
+  });
   const sceneRef = useRef(null);
   const controlsRef = useRef(null);
   const cameraRef = useRef(null);
@@ -91,67 +115,14 @@ const Earth3D = () => {
   const markerGroupsRef = useRef([]);
   const markerMaterialsRef = useRef([]); // Store materials directly for easier updates
   const starsRef = useRef(null); // Reference to stars object
+  const glowRef = useRef(null); // Reference to glow object
   
-  // Initialize audio element
-  useEffect(() => {
-    if (!audioRef.current) {
-      audioRef.current = new Audio();
-      audioRef.current.crossOrigin = 'anonymous';
-      audioRef.current.preload = 'none';
-      
-      const handleLoadStart = () => {
-        setIsLoadingAudio(true);
-        setAudioError(null);
-      };
-      
-      const handleCanPlay = () => {
-        setIsLoadingAudio(false);
-        setAudioError(null);
-        setIsAttemptingPlay(false);
-      };
-      
-      const handleError = (e) => {
-        setIsLoadingAudio(false);
-        // Only set error if we were actually attempting to play
-        if (isAttemptingPlay) {
-          setAudioError('Failed to load audio stream');
-          setIsPlaying(false);
-          setIsAttemptingPlay(false);
-        }
-        console.error('Audio error:', e);
-      };
-      
-      const handleEnded = () => {
-        setIsPlaying(false);
-      };
-      
-      audioRef.current.addEventListener('loadstart', handleLoadStart);
-      audioRef.current.addEventListener('canplay', handleCanPlay);
-      audioRef.current.addEventListener('error', handleError);
-      audioRef.current.addEventListener('ended', handleEnded);
-      
-      return () => {
-        if (audioRef.current) {
-          audioRef.current.removeEventListener('loadstart', handleLoadStart);
-          audioRef.current.removeEventListener('canplay', handleCanPlay);
-          audioRef.current.removeEventListener('error', handleError);
-          audioRef.current.removeEventListener('ended', handleEnded);
-          audioRef.current.pause();
-          audioRef.current.src = '';
-        }
-      };
-    }
-  }, [isAttemptingPlay]);
-
-  // Clear error when station changes
   useEffect(() => {
     if (selectedCountry) {
       setAudioError(null);
     }
   }, [selectedCountry]);
 
-  // Load favorites, history, alarms, marker color, and stars preference from localStorage on mount
-  // Load marker color FIRST so it's available when markers are created
   useEffect(() => {
     const savedMarkerColor = localStorage.getItem('radioGardenMarkerColor');
     if (savedMarkerColor) {
@@ -181,7 +152,6 @@ const Earth3D = () => {
     }
   }, []);
 
-  // Save favorites, history, and alarms to localStorage
   useEffect(() => {
     localStorage.setItem('radioGardenFavorites', JSON.stringify(favorites));
   }, [favorites]);
@@ -194,17 +164,18 @@ const Earth3D = () => {
     localStorage.setItem('radioGardenAlarms', JSON.stringify(alarms));
   }, [alarms]);
 
-  // Save marker color to localStorage
   useEffect(() => {
     localStorage.setItem('radioGardenMarkerColor', markerColor.toString(16));
   }, [markerColor]);
 
-  // Save stars preference to localStorage
   useEffect(() => {
     localStorage.setItem('radioGardenShowStars', showStars.toString());
   }, [showStars]);
 
-  // Update stars visibility when showStars changes
+  useEffect(() => {
+    localStorage.setItem('radioGardenShowGlow', showGlow.toString());
+  }, [showGlow]);
+
   useEffect(() => {
     const updateStarsVisibility = () => {
       if (starsRef.current && sceneRef.current) {
@@ -228,7 +199,29 @@ const Earth3D = () => {
     return () => clearTimeout(timeoutId);
   }, [showStars]);
 
-  // Update marker colors when markerColor changes
+  useEffect(() => {
+    const updateGlowVisibility = () => {
+      if (glowRef.current && sceneRef.current) {
+        // Check if glow is already in the scene
+        const isInScene = glowRef.current.parent === sceneRef.current;
+        
+        if (showGlow) {
+          if (!isInScene) {
+            sceneRef.current.add(glowRef.current);
+          }
+        } else {
+          if (isInScene) {
+            sceneRef.current.remove(glowRef.current);
+          }
+        }
+      }
+    };
+    
+    // Small delay to ensure scene and glow are ready
+    const timeoutId = setTimeout(updateGlowVisibility, 50);
+    return () => clearTimeout(timeoutId);
+  }, [showGlow]);
+
   useEffect(() => {
     const updateMarkerColors = () => {
       // Try updating via materials ref first (more direct)
@@ -265,7 +258,6 @@ const Earth3D = () => {
     return () => clearTimeout(timeoutId);
   }, [markerColor]);
 
-  // Toggle favorite
   const toggleFavorite = (station) => {
     const isFavorite = favorites.some(fav => fav.streamUrl === station.streamUrl);
     if (isFavorite) {
@@ -275,10 +267,8 @@ const Earth3D = () => {
     }
   };
 
-  // Check if current station is favorite
   const isFavorite = selectedCountry && favorites.some(fav => fav.streamUrl === selectedCountry.streamUrl);
 
-  // Play favorite station
   const playFavorite = (station) => {
     if (isLocked) return;
     setSelectedCountry(station);
@@ -291,21 +281,18 @@ const Earth3D = () => {
     });
   };
 
-  // Toggle lock station
   const toggleLock = () => {
     setIsLocked(!isLocked);
     isLockedRef.current = !isLockedRef.current;
   };
 
-  // Update lock ref when state changes
   useEffect(() => {
     isLockedRef.current = isLocked;
   }, [isLocked]);
 
-  // Surprise me - random station and camera position
   const surpriseMe = () => {
     if (isLocked) return;
-    const randomStation = radioStations[Math.floor(Math.random() * radioStations.length)];
+    const randomStation = stations[Math.floor(Math.random() * stations.length)];
     
     setSelectedCountry(randomStation);
     setShowInfoPanel(true);
@@ -319,7 +306,6 @@ const Earth3D = () => {
     scrollToStation(randomStation.lat, randomStation.lon);
   };
 
-  // Play from history
   const playFromHistory = (station) => {
     if (isLocked) return;
     
@@ -336,7 +322,6 @@ const Earth3D = () => {
     scrollToStation(station.lat, station.lon);
   };
 
-  // Schedule alarm
   const scheduleAlarm = (station, time) => {
     const alarm = {
       id: Date.now(),
@@ -348,19 +333,16 @@ const Earth3D = () => {
     setShowAlarmModal(false);
   };
 
-  // Delete alarm
   const deleteAlarm = (alarmId) => {
     setAlarms(alarms.filter(alarm => alarm.id !== alarmId));
   };
 
-  // Toggle alarm enabled state
   const toggleAlarm = (alarmId) => {
     setAlarms(alarms.map(alarm => 
       alarm.id === alarmId ? { ...alarm, enabled: !alarm.enabled } : alarm
     ));
   };
 
-  // Get time until alarm
   const getTimeUntilAlarm = (alarmTime) => {
     const now = new Date();
     const [hours, minutes] = alarmTime.split(':').map(Number);
@@ -383,7 +365,6 @@ const Earth3D = () => {
     }
   };
 
-  // Check alarms
   useEffect(() => {
     const checkAlarms = () => {
       const now = new Date();
@@ -413,27 +394,166 @@ const Earth3D = () => {
 
   // Handle play/pause
   useEffect(() => {
-    if (!audioRef.current || !selectedCountry) return;
+    // Create new audio instance for this session
+    // This ensures a "hard reset" of the media pipeline on every station change
+    const audio = new Audio();
+    audio.crossOrigin = 'anonymous';
+    audio.preload = 'none';
+    audioRef.current = audio;
+
+    // Define handlers
+    const handleLoadStart = () => {
+      setIsLoadingAudio(true);
+      setAudioError(null);
+    };
     
-    if (isPlaying && hasStarted) {
+    const handleCanPlay = () => {
+      setIsLoadingAudio(false);
+      setAudioError(null);
+      setIsAttemptingPlay(false);
+    };
+    
+    const handleError = (e) => {
+      setIsLoadingAudio(false);
+      // Only set error if we were actually attempting to play and this is the active audio
+      if (audioRef.current === audio) {
+        console.error('Audio error:', e);
+        setAudioError('Failed to load audio stream');
+        setIsPlaying(false);
+        setIsAttemptingPlay(false);
+      }
+    };
+    
+    const handleEnded = () => {
+      if (audioRef.current === audio) {
+        setIsPlaying(false);
+      }
+    };
+
+    // Attach listeners
+    audio.addEventListener('loadstart', handleLoadStart);
+    audio.addEventListener('canplay', handleCanPlay);
+    audio.addEventListener('error', handleError);
+    audio.addEventListener('ended', handleEnded);
+
+    if (isPlaying && hasStarted && selectedCountry) {
       // Clear any previous errors when starting to play
       setAudioError(null);
       setIsAttemptingPlay(true);
       
-      if (audioRef.current.src !== selectedCountry.streamUrl) {
-        audioRef.current.src = selectedCountry.streamUrl;
+      const isHls = Hls.isSupported() && (selectedCountry.isHls || selectedCountry.streamUrl.includes('.m3u8') || selectedCountry.streamUrl.includes('.m3u'));
+
+      if (isHls) {
+        const hls = new Hls({
+          enableWorker: true,
+          lowLatencyMode: true,
+          backBufferLength: 90
+        });
+        hlsRef.current = hls;
+        
+        // Attach media first
+        hls.attachMedia(audio);
+        
+        // Load source only after media is attached
+        hls.on(Hls.Events.MEDIA_ATTACHED, () => {
+          // Safety check: ensure this HLS instance is still the active one
+          if (hlsRef.current === hls) {
+            hls.loadSource(selectedCountry.streamUrl);
+          }
+        });
+        
+        hls.on(Hls.Events.MANIFEST_PARSED, () => {
+          // Check if we are still playing and this is still the active HLS instance
+          if (isPlaying && audioRef.current === audio && hlsRef.current === hls) {
+            const playPromise = audio.play();
+            if (playPromise !== undefined) {
+              playPromise.catch(err => {
+                // AbortError is common when switching quickly, ignore it
+                if (err.name !== 'AbortError') {
+                  console.error('Play error:', err);
+                  setAudioError('Failed to play audio. Please check your connection.');
+                  setIsPlaying(false);
+                }
+                setIsAttemptingPlay(false);
+              });
+            }
+          }
+        });
+
+        hls.on(Hls.Events.ERROR, (event, data) => {
+          if (hlsRef.current !== hls) return; // Ignore errors from stale instances
+          
+          if (data.fatal) {
+            switch (data.type) {
+              case Hls.ErrorTypes.NETWORK_ERROR:
+                console.log('HLS Network error, recovering...');
+                hls.startLoad();
+                break;
+              case Hls.ErrorTypes.MEDIA_ERROR:
+                console.log('HLS Media error, recovering...');
+                hls.recoverMediaError();
+                break;
+              default:
+                console.error('HLS Fatal error:', data);
+                hls.destroy();
+                break;
+            }
+          }
+        });
+      } else {
+        // Native playback
+        audio.src = selectedCountry.streamUrl;
+        const playPromise = audio.play();
+        
+        if (playPromise !== undefined) {
+          playPromise.catch(err => {
+             // AbortError is common when switching quickly, ignore it
+             if (err.name !== 'AbortError') {
+              console.error('Play error:', err);
+              setAudioError('Failed to play audio. Please check your connection.');
+              setIsPlaying(false);
+            }
+            setIsAttemptingPlay(false);
+          });
+        }
       }
-      audioRef.current.play().catch(err => {
-        console.error('Play error:', err);
-        setAudioError('Failed to play audio. Please check your connection.');
-        setIsPlaying(false);
-        setIsAttemptingPlay(false);
-      });
     } else {
-      audioRef.current.pause();
       setIsAttemptingPlay(false);
     }
+
+    // Cleanup function
+    return () => {
+      // Remove listeners
+      audio.removeEventListener('loadstart', handleLoadStart);
+      audio.removeEventListener('canplay', handleCanPlay);
+      audio.removeEventListener('error', handleError);
+      audio.removeEventListener('ended', handleEnded);
+
+      // Stop playback
+      audio.pause();
+      audio.src = '';
+      
+      // Cleanup HLS
+      if (hlsRef.current) {
+        hlsRef.current.destroy();
+        hlsRef.current = null;
+      }
+      
+      // Clear ref if it matches (though next effect run will overwrite it)
+      if (audioRef.current === audio) {
+        audioRef.current = null;
+      }
+    };
   }, [isPlaying, selectedCountry, hasStarted]);
+
+  // Cleanup HLS on unmount
+  useEffect(() => {
+    return () => {
+      if (hlsRef.current) {
+        hlsRef.current.destroy();
+      }
+    };
+  }, []);
 
   // Song detection effect
   useEffect(() => {
@@ -469,13 +589,25 @@ const Earth3D = () => {
     return () => clearInterval(timer);
   }, []);
 
-  // Handle start button click
   const handleStart = () => {
     setHasStarted(true);
+    
+    // Auto-scroll to Philippines (user country location)
+    // Try to find a station in Philippines first
+    const phStation = stations.find(s => 
+      s.country === 'Philippines' || 
+      (s.address && s.address.includes('Philippines'))
+    );
+    
+    if (phStation) {
+      scrollToStation(phStation.lat, phStation.lon);
+    } else {
+      // Fallback to Philippines coordinates if no station found
+      scrollToStation(12.8797, 121.7740);
+    }
   };
 
 
-  // Convert lat/lon to 3D coordinates on a sphere
   const latLonToVector3 = (lat, lon, radius) => {
     const phi = (90 - lat) * (Math.PI / 180);
     const theta = (lon + 180) * (Math.PI / 180);
@@ -487,7 +619,6 @@ const Earth3D = () => {
     return new THREE.Vector3(x, y, z);
   };
 
-  // Scroll camera to station - simple working version
   const scrollToStation = (lat, lon) => {
     setTimeout(() => {
       if (!controlsRef.current) return;
@@ -498,10 +629,10 @@ const Earth3D = () => {
       // Get station position
       const stationPos = latLonToVector3(lat, lon, 2);
       
-      // Position camera opposite to station (so it sees station when looking at center)
+      // Position camera in front of station (so it sees station when looking at center)
       const dist = 4.5;
       const dir = stationPos.clone().normalize();
-      const targetPos = dir.multiplyScalar(-dist);
+      const targetPos = dir.multiplyScalar(dist);
       
       // Disable controls
       const wasEnabled = controlsRef.current.enabled;
@@ -513,17 +644,45 @@ const Earth3D = () => {
       let t = 0;
       
       const anim = () => {
-        t += 0.02;
+        t += 0.02; // Faster animation speed (was 0.005)
         if (t < 1) {
+          // Standard linear interpolation
           camera.position.lerpVectors(start, targetPos, t);
+          
+          // Force orbital distance to prevent "cutting through" the globe
+          // This creates a smooth arc. Comment out this line to revert to "through globe" style.
+          camera.position.normalize().multiplyScalar(dist);
+          
           camera.lookAt(0, 0, 0);
           requestAnimationFrame(anim);
         } else {
           camera.position.copy(targetPos);
           camera.lookAt(0, 0, 0);
-          controlsRef.current.target.set(0, 0, 0);
-          controlsRef.current.enabled = wasEnabled;
-          controlsRef.current.update();
+          
+          // Fix teleport bug: Re-instantiate OrbitControls to sync with new camera position
+          if (controlsRef.current) {
+            const domElement = controlsRef.current.domElement;
+            controlsRef.current.dispose();
+            
+            const newControls = new OrbitControls(camera, domElement);
+            newControls.enableDamping = true;
+            newControls.dampingFactor = 0.05;
+            newControls.minDistance = 2.5;
+            newControls.maxDistance = 20;
+            newControls.autoRotate = false;
+            newControls.autoRotateSpeed = 0;
+            newControls.enablePan = true;
+            newControls.enableZoom = true;
+            newControls.target.set(0, 0, 0);
+            
+            // Restore enabled state
+            newControls.enabled = wasEnabled;
+            
+            controlsRef.current = newControls;
+            if (sceneRef.current) {
+              sceneRef.current.userData.controls = newControls;
+            }
+          }
         }
       };
       
@@ -531,7 +690,6 @@ const Earth3D = () => {
     }, 100);
   };
 
-  // Create a radio station marker with invisible click area
   const createMarker = (country, earthRadius, color = markerColor) => {
     const position = latLonToVector3(country.lat, country.lon, earthRadius + 0.05);
     
@@ -539,8 +697,8 @@ const Earth3D = () => {
     const markerGroup = new THREE.Group();
     markerGroup.position.copy(position);
     
-    // Create VISIBLE sphere marker (larger and more visible)
-    const markerGeometry = new THREE.SphereGeometry(0.04, 16, 16);
+    // Create VISIBLE sphere marker (smaller size)
+    const markerGeometry = new THREE.SphereGeometry(0.02, 16, 16);
     const markerMaterial = new THREE.MeshBasicMaterial({ 
       color: color,
       transparent: true,
@@ -563,7 +721,7 @@ const Earth3D = () => {
     markerGroup.add(clickArea);
     
     // Add a visible ring around the marker
-    const pulseGeometry = new THREE.RingGeometry(0.05, 0.07, 16);
+    const pulseGeometry = new THREE.RingGeometry(0.025, 0.035, 16);
     const pulseMaterial = new THREE.MeshBasicMaterial({ 
       color: color,
       transparent: true,
@@ -589,7 +747,7 @@ const Earth3D = () => {
   };
 
   useEffect(() => {
-    if (!mountRef.current) return;
+    if (!mountRef.current || !stationsLoaded) return;
 
     const scene = new THREE.Scene();
     // Static dark blue gradient background (no stars)
@@ -644,7 +802,6 @@ const Earth3D = () => {
         const earth = new THREE.Mesh(earthGeometry, earthMaterial);
         scene.add(earth);
         
-        // Get current marker color from localStorage or state
         const getCurrentMarkerColor = () => {
           const saved = localStorage.getItem('radioGardenMarkerColor');
           if (saved) {
@@ -656,13 +813,12 @@ const Earth3D = () => {
           return markerColor;
         };
         
-        // Create ASEAN markers - use current color from localStorage or state
         const markerGroups = [];
         const clickAreas = []; // Separate array for click detection
         const currentColor = getCurrentMarkerColor(); // Get actual current color
         
         const markerMaterials = [];
-        radioStations.forEach(station => {
+        stations.forEach(station => {
           const { markerGroup, clickArea } = createMarker(station, earthRadius, currentColor);
           earth.add(markerGroup);
           markerGroups.push(markerGroup);
@@ -681,10 +837,6 @@ const Earth3D = () => {
         markerGroupsRef.current = markerGroups;
         markerMaterialsRef.current = markerMaterials;
         
-        // Color will be applied by the useEffect that watches markerColor
-        // This ensures it uses the latest state value, not a captured closure value
-
-        // Create stars background
         const createStars = () => {
           const starsGeometry = new THREE.BufferGeometry();
           const starsCount = 5000;
@@ -729,7 +881,33 @@ const Earth3D = () => {
         
         createStars();
 
-        // Add orbit controls with NO auto-rotation
+        const createGlow = () => {
+          // Simple additive glow
+          const glowGeometry = new THREE.SphereGeometry(2.15, 64, 64);
+          const glowMaterial = new THREE.MeshBasicMaterial({
+            color: 0x4488ff,
+            transparent: true,
+            opacity: 0.15,
+            side: THREE.FrontSide,
+            blending: THREE.AdditiveBlending,
+            depthWrite: false
+          });
+          
+          const glow = new THREE.Mesh(glowGeometry, glowMaterial);
+          glowRef.current = glow;
+          scene.userData.glow = glow;
+          
+          // Check localStorage directly
+          const savedShowGlow = localStorage.getItem('radioGardenShowGlow');
+          const shouldShow = savedShowGlow !== null ? savedShowGlow === 'true' : false;
+          
+          if (shouldShow) {
+            scene.add(glow);
+          }
+        };
+        
+        createGlow();
+
         const controls = new OrbitControls(camera, renderer.domElement);
         controls.enableDamping = true;
         controls.dampingFactor = 0.05;
@@ -743,7 +921,6 @@ const Earth3D = () => {
         // Store hover state
         let hoveredMarker = null;
 
-        // Mouse click handler - IMPROVED
         const handleClick = (event) => {
           const rect = renderer.domElement.getBoundingClientRect();
           mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
@@ -758,7 +935,6 @@ const Earth3D = () => {
             const clickArea = intersects[0].object;
             const countryData = clickArea.userData.countryData;
             
-            // Check if locked
             if (isLockedRef.current) {
             // Visual feedback that station is locked
             if (clickArea.userData.visibleMarker) {
@@ -783,7 +959,6 @@ const Earth3D = () => {
               return newHistory;
             });
             
-            // Visual feedback on the visible marker
             if (clickArea.userData.visibleMarker) {
               // Get current color from the marker itself
               const originalColor = clickArea.userData.visibleMarker.material.color.getHex();
@@ -793,15 +968,12 @@ const Earth3D = () => {
               }, 300);
             }
           } else {
-            // Don't clear selectedCountry or stop playing when clicking empty space
-            // Just close the panel if it's open
             if (showInfoPanel) {
               setShowInfoPanel(false);
             }
           }
         };
 
-        // Mouse move handler for hover effect - IMPROVED
         const handleMouseMove = (event) => {
           const rect = renderer.domElement.getBoundingClientRect();
           mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
@@ -868,8 +1040,8 @@ const Earth3D = () => {
           }
           
           // Only update controls if they're enabled (prevents interference with camera animation)
-          if (controls.enabled) {
-            controls.update();
+          if (controlsRef.current && controlsRef.current.enabled) {
+            controlsRef.current.update();
           }
           renderer.render(scene, camera);
         };
@@ -930,7 +1102,7 @@ const Earth3D = () => {
         scene.userData.controls.dispose();
       }
     };
-  }, []);
+  }, [stationsLoaded, stations]);
 
   // Format time for display
   const formatTime = (date) => {
@@ -947,6 +1119,84 @@ const Earth3D = () => {
       month: 'short',
       day: 'numeric'
     });
+  };
+
+  // Handle station selection from list
+  const handleStationSelect = (station) => {
+    if (isLocked) return;
+    
+    setSelectedCountry(station);
+    setShowInfoPanel(true);
+    setIsPlaying(true);
+    
+    // Add to history
+    setHistory(prev => {
+      const newHistory = [station, ...prev.filter(h => h.streamUrl !== station.streamUrl)].slice(0, 50);
+      return newHistory;
+    });
+    
+    // Scroll to station
+    scrollToStation(station.lat, station.lon);
+  };
+
+  // Find nearest station logic
+  const findNearestStation = (current, excludeList = []) => {
+    if (!current || stations.length === 0) return null;
+    
+    // Calculate distances to all other stations
+    const stationsWithDist = stations
+      .filter(s => s.streamUrl !== current.streamUrl && !excludeList.includes(s.streamUrl))
+      .map(s => {
+        // Simple Euclidean distance on lat/lon is sufficient for "nearest" finding locally
+        // For global accuracy, we should use Haversine, but this is fast and good enough for neighbors
+        const dLat = s.lat - current.lat;
+        const dLon = s.lon - current.lon;
+        const dist = Math.sqrt(dLat * dLat + dLon * dLon);
+        return { ...s, dist };
+      });
+      
+    // Sort by distance
+    stationsWithDist.sort((a, b) => a.dist - b.dist);
+    
+    return stationsWithDist.length > 0 ? stationsWithDist[0] : null;
+  };
+
+  // Handle Next Station (Nearest)
+  const handleNextStation = () => {
+    if (!selectedCountry) return;
+    
+    // Find nearest station
+    const nearest = findNearestStation(selectedCountry);
+    
+    if (nearest) {
+      handleStationSelect(nearest);
+    }
+  };
+
+  // Handle Previous Station
+  const handlePrevStation = () => {
+    // If we have history (more than just the current one), go back
+    if (history.length > 1) {
+      // Index 0 is current, Index 1 is previous
+      const prevStation = history[1];
+      // Move it to top of history (standard behavior) or just play it
+      // handleStationSelect adds to top, so let's just use that
+      handleStationSelect(prevStation);
+    } else if (selectedCountry) {
+      // If no history, find nearest but exclude the one we might have just come from (Next)
+      // Actually, let's just find the 2nd nearest or a "random" nearest?
+      // Or maybe "Previous" implies reverse direction?
+      // Let's just find the nearest one that ISN'T the one we would go to with "Next"
+      // to avoid a loop A -> B -> A
+      const nearest = findNearestStation(selectedCountry);
+      if (nearest) {
+         // Find nearest excluding the primary nearest
+         const secondNearest = findNearestStation(selectedCountry, [nearest.streamUrl]);
+         if (secondNearest) {
+            handleStationSelect(secondNearest);
+         }
+      }
+    }
   };
 
   // Close info panel (but keep audio playing)
@@ -969,12 +1219,25 @@ const Earth3D = () => {
     <div className="earth3d-container">
       <div className="earth3d-canvas" ref={mountRef}></div>
       
+      {/* Station List Overlay */}
+      <StationList 
+        stations={stations}
+        onSelectStation={(station) => {
+          handleStationSelect(station);
+          setShowStationList(false);
+        }}
+        isOpen={showStationList}
+        onClose={() => setShowStationList(false)}
+        currentStation={selectedCountry}
+      />
+      
       {/* Play to Start Overlay */}
       {!hasStarted && !loading && (
         <div className="play-to-start-overlay">
           <div className="play-to-start-content">
+            <img src={radiologo} alt="Radio Garden Logo" className="play-to-start-logo" />
             <h1 className="play-to-start-title">Radio Garden</h1>
-            <p className="play-to-start-subtitle">Explore live radio stations around the world</p>
+            <p className="play-to-start-subtitle">Global Radio Player with Essentials</p>
             <button className="play-to-start-button" onClick={handleStart}>
               <svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
                 <path d="M5 3L19 12L5 21V3Z" fill="currentColor"/>
@@ -998,6 +1261,7 @@ const Earth3D = () => {
           <div className="mini-current-time">{formatTime(currentTime)}</div>
           <div className="mini-current-date">{formatDate(currentTime)}</div>
         </div>
+        <img src={radiologo} alt="Radio Garden" className="header-logo" />
         <div className="mini-title">
           <span className="title-text">Radio Garden</span>
         </div>
@@ -1022,12 +1286,29 @@ const Earth3D = () => {
         {favorites.length > 0 && <span className="favorites-count">{favorites.length}</span>}
       </button>
 
+      {/* Station List Button */}
+      <button 
+        className={`feature-button station-list-button ${showStationList ? 'active' : ''}`}
+        onClick={() => setShowStationList(!showStationList)}
+        title="Station List"
+        style={{ top: '180px' }}
+      >
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <path d="M8 6H21" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+          <path d="M8 12H21" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+          <path d="M8 18H21" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+          <path d="M3 6H3.01" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+          <path d="M3 12H3.01" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+          <path d="M3 18H3.01" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+        </svg>
+      </button>
+
       {/* Lock Station Button */}
       <button 
         className={`feature-button lock-button ${isLocked ? 'active' : ''}`}
         onClick={toggleLock}
         title={isLocked ? 'Unlock Station' : 'Lock Station'}
-        style={{ top: '180px' }}
+        style={{ top: '240px' }}
       >
         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
           {isLocked ? (
@@ -1049,7 +1330,7 @@ const Earth3D = () => {
         className="feature-button alarm-button"
         onClick={() => setShowAlarms(!showAlarms)}
         title="Scheduled Alarms"
-        style={{ top: '240px' }}
+        style={{ top: '300px' }}
       >
         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
           <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="2"/>
@@ -1063,7 +1344,7 @@ const Earth3D = () => {
         className="feature-button surprise-button"
         onClick={surpriseMe}
         title="Surprise Me"
-        style={{ top: '300px' }}
+        style={{ top: '360px' }}
         disabled={isLocked}
       >
         <img 
@@ -1078,7 +1359,7 @@ const Earth3D = () => {
         className="feature-button history-button"
         onClick={() => setShowHistory(!showHistory)}
         title="History / Travel Log"
-        style={{ top: '360px' }}
+        style={{ top: '420px' }}
       >
         <img 
           src="https://unpkg.com/lucide-static@latest/icons/scroll-text.svg" 
@@ -1093,7 +1374,7 @@ const Earth3D = () => {
         className="feature-button customization-button"
         onClick={() => setShowColorPicker(!showColorPicker)}
         title="Customize"
-        style={{ top: '420px' }}
+        style={{ top: '480px' }}
       >
         <img 
           src="https://unpkg.com/lucide-static@latest/icons/palette.svg" 
@@ -1133,6 +1414,26 @@ const Earth3D = () => {
                 )}
               </svg>
               <span>{showStars ? 'On' : 'Off'}</span>
+            </button>
+          </div>
+
+          {/* Atmosphere Glow Toggle */}
+          <div className="customization-section">
+            <div className="customization-label">Atmosphere Glow</div>
+            <button 
+              className={`stars-toggle ${showGlow ? 'active' : ''}`}
+              onClick={() => setShowGlow(!showGlow)}
+              title={showGlow ? 'Hide Glow' : 'Show Glow'}
+            >
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                {showGlow ? (
+                  <circle cx="12" cy="12" r="6" stroke="currentColor" strokeWidth="2" fill="currentColor" fillOpacity="0.3" />
+                ) : (
+                  <circle cx="12" cy="12" r="6" stroke="currentColor" strokeWidth="2" fill="none" />
+                )}
+                <path d="M12 1V3M12 21V23M1 12H3M21 12H23M4.22 4.22L5.64 5.64M18.36 18.36L19.78 19.78M4.22 19.78L5.64 18.36M18.36 5.64L19.78 4.22" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+              </svg>
+              <span>{showGlow ? 'On' : 'Off'}</span>
             </button>
           </div>
           
@@ -1479,6 +1780,7 @@ const Earth3D = () => {
             <div className="player-controls">
               <button 
                 className="player-btn prev-btn"
+                onClick={handlePrevStation}
                 title="Previous Station"
               >
                 <svg width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
@@ -1506,6 +1808,7 @@ const Earth3D = () => {
               
               <button 
                 className="player-btn next-btn"
+                onClick={handleNextStation}
                 title="Next Station"
               >
                 <svg width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">

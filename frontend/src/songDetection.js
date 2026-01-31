@@ -10,7 +10,7 @@ class SongDetectionService {
 
     this.shazamConfig = {
       apiKey: '15f4b239b2mshaeeae7ac5ddf658p16cffdjsn05fdf1b05836', 
-
+          // no work i don knowwhy
       apiHost: 'shazam-api7.p.rapidapi.com',
       baseUrl: 'https://shazam-api7.p.rapidapi.com'
     };
