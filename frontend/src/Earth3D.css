@@ -611,6 +611,11 @@
   box-shadow: 0 0 0 3px rgba(76, 175, 80, 0.1);
 }
 
+.alarm-time-input::-webkit-calendar-picker-indicator {
+  filter: invert(1);
+  cursor: pointer;
+}
+
 .alarm-select option {
   background: rgba(20, 20, 30, 0.95);
   color: #fff;

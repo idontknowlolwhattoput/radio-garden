@@ -1695,6 +1695,7 @@ const Earth3D = () => {
               </button>
             </div>
             <AlarmForm 
+              stations={stations}
               selectedStation={selectedCountry}
               onSchedule={scheduleAlarm}
               onClose={() => setShowAlarmModal(false)}
