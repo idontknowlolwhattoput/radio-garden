@@ -8,7 +8,7 @@
   backdrop-filter: blur(4px);
   z-index: 2000;
   display: flex;
-  justify-content: flex-start; /* Sidebar style - Left side */
+  justify-content: flex-start; 
   animation: fadeIn 0.3s ease;
 }
 
@@ -18,15 +18,15 @@
   height: 100%;
   background: rgba(20, 20, 30, 0.95);
   backdrop-filter: blur(20px);
-  border-right: 1px solid rgba(255, 255, 255, 0.1); /* Border on right */
+  border-right: 1px solid rgba(255, 255, 255, 0.1); 
   display: flex;
   flex-direction: column;
-  box-shadow: 10px 0 30px rgba(0, 0, 0, 0.5); /* Shadow on right */
+  box-shadow: 10px 0 30px rgba(0, 0, 0, 0.5); 
   animation: slideIn 0.3s cubic-bezier(0.16, 1, 0.3, 1);
 }
 
 @keyframes slideIn {
-  from { transform: translateX(-100%); } /* Slide from left */
+  from { transform: translateX(-100%); } 
   to { transform: translateX(0); }
 }
 
@@ -110,13 +110,13 @@
 .filter-row {
   display: flex;
   gap: 10px;
-  flex-wrap: wrap; /* Allow wrapping if needed */
+  flex-wrap: wrap; 
 }
 
 .filter-select {
   flex: 1;
-  min-width: 120px; /* Ensure minimum usable width */
-  max-width: 100%; /* Prevent overflow */
+  min-width: 120px; 
+  max-width: 100%; 
   background: rgba(255, 255, 255, 0.05);
   border: 1px solid rgba(255, 255, 255, 0.1);
   border-radius: 8px;
@@ -131,10 +131,9 @@
   background-size: 16px;
 }
 
-/* Fix for invisible text in dropdown options */
 .filter-select option {
-  background-color: #1a1a2e; /* Dark background for options */
-  color: #fff; /* White text */
+  background-color: #1a1a2e; 
+  color: #fff; 
 }
 
 .filter-select:focus {
@@ -206,7 +205,7 @@
 
 .station-item-info {
   flex: 1;
-  min-width: 0; /* Text truncation */
+  min-width: 0; 
 }
 
 .station-item-name {

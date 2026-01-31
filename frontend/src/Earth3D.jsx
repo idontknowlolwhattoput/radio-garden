@@ -96,14 +96,14 @@ const Earth3D = () => {
   const [alarms, setAlarms] = useState([]);
   const [detectedSong, setDetectedSong] = useState(null);
   const [isDetectingSong, setIsDetectingSong] = useState(false);
+  const [detectionStatus, setDetectionStatus] = useState('idle');
+  const [detectionError, setDetectionError] = useState(null);
   const [markerColor, setMarkerColor] = useState(0x4CAF50); // Default green
   const [showColorPicker, setShowColorPicker] = useState(false);
-  // Initialize showStars from localStorage, default to false if not set
   const [showStars, setShowStars] = useState(() => {
     const saved = localStorage.getItem('radioGardenShowStars');
     return saved !== null ? saved === 'true' : false;
   });
-  // Initialize showGlow from localStorage
   const [showGlow, setShowGlow] = useState(() => {
     const saved = localStorage.getItem('radioGardenShowGlow');
     return saved !== null ? saved === 'true' : false;
@@ -113,9 +113,9 @@ const Earth3D = () => {
   const cameraRef = useRef(null);
   const isLockedRef = useRef(false);
   const markerGroupsRef = useRef([]);
-  const markerMaterialsRef = useRef([]); // Store materials directly for easier updates
-  const starsRef = useRef(null); // Reference to stars object
-  const glowRef = useRef(null); // Reference to glow object
+  const markerMaterialsRef = useRef([]); 
+  const starsRef = useRef(null); 
+  const glowRef = useRef(null);
   
   useEffect(() => {
     if (selectedCountry) {
@@ -179,7 +179,6 @@ const Earth3D = () => {
   useEffect(() => {
     const updateStarsVisibility = () => {
       if (starsRef.current && sceneRef.current) {
-        // Check if stars are already in the scene by checking the parent
         const isInScene = starsRef.current.parent === sceneRef.current;
         
         if (showStars) {
@@ -194,7 +193,6 @@ const Earth3D = () => {
       }
     };
     
-    // Small delay to ensure scene and stars are ready
     const timeoutId = setTimeout(updateStarsVisibility, 50);
     return () => clearTimeout(timeoutId);
   }, [showStars]);
@@ -555,29 +553,46 @@ const Earth3D = () => {
     };
   }, []);
 
-  // Song detection effect
   useEffect(() => {
     if (isPlaying && hasStarted && audioRef.current && selectedCountry) {
-      // Start song detection
       setIsDetectingSong(true);
-      setDetectedSong(null); // Clear previous detection
+      setDetectedSong(null); 
+      setDetectionStatus('detecting');
+      setDetectionError(null);
       
       const handleSongDetected = (song) => {
         setDetectedSong(song);
         setIsDetectingSong(false);
       };
+
+      const handleStatusChange = (status, error) => {
+        setDetectionStatus(status);
+        if (status === 'error') {
+          setDetectionError(error);
+          setIsDetectingSong(false);
+        } else if (status === 'detecting') {
+          setIsDetectingSong(true);
+          setDetectionError(null);
+        } else if (status === 'no-match') {
+          setIsDetectingSong(false);
+          setDetectionError(null);
+        } else if (status === 'success') {
+          setIsDetectingSong(false);
+          setDetectionError(null);
+        }
+      };
       
-      songDetectionService.startDetection(audioRef.current, handleSongDetected);
+      songDetectionService.startDetection(audioRef.current, handleSongDetected, handleStatusChange);
       
       return () => {
-        // Stop detection when component unmounts or stops playing
         songDetectionService.stopDetection();
         setIsDetectingSong(false);
+        setDetectionStatus('idle');
       };
     } else {
-      // Stop detection when not playing
       songDetectionService.stopDetection();
       setIsDetectingSong(false);
+      setDetectionStatus('idle');
     }
   }, [isPlaying, hasStarted, selectedCountry]);
 
@@ -626,31 +641,25 @@ const Earth3D = () => {
       const camera = cameraRef.current || controlsRef.current.object;
       if (!camera) return;
       
-      // Get station position
       const stationPos = latLonToVector3(lat, lon, 2);
       
-      // Position camera in front of station (so it sees station when looking at center)
       const dist = 4.5;
       const dir = stationPos.clone().normalize();
       const targetPos = dir.multiplyScalar(dist);
       
-      // Disable controls
       const wasEnabled = controlsRef.current.enabled;
       controlsRef.current.enabled = false;
       controlsRef.current.target.set(0, 0, 0);
       
-      // Animate
       const start = camera.position.clone();
       let t = 0;
       
       const anim = () => {
-        t += 0.02; // Faster animation speed (was 0.005)
+        t += 0.02; 
         if (t < 1) {
-          // Standard linear interpolation
           camera.position.lerpVectors(start, targetPos, t);
           
-          // Force orbital distance to prevent "cutting through" the globe
-          // This creates a smooth arc. Comment out this line to revert to "through globe" style.
+      // Force orbital distance to prevent "cutting through" the globe
           camera.position.normalize().multiplyScalar(dist);
           
           camera.lookAt(0, 0, 0);
@@ -659,7 +668,6 @@ const Earth3D = () => {
           camera.position.copy(targetPos);
           camera.lookAt(0, 0, 0);
           
-          // Fix teleport bug: Re-instantiate OrbitControls to sync with new camera position
           if (controlsRef.current) {
             const domElement = controlsRef.current.domElement;
             controlsRef.current.dispose();
@@ -675,7 +683,6 @@ const Earth3D = () => {
             newControls.enableZoom = true;
             newControls.target.set(0, 0, 0);
             
-            // Restore enabled state
             newControls.enabled = wasEnabled;
             
             controlsRef.current = newControls;
@@ -1871,6 +1878,14 @@ const Earth3D = () => {
                     <div className="detecting-spinner"></div>
                     <span>Detecting song...</span>
                   </div>
+                ) : detectionStatus === 'error' ? (
+                   <div className="track-name" style={{fontSize: '0.9em', color: '#ff6b6b'}}>
+                      {detectionError === 'Stream protected' ? 'Song detection unavailable (Stream Protected)' : 'Song detection failed'}
+                   </div>
+                ) : detectionStatus === 'no-match' ? (
+                   <div className="track-name" style={{fontSize: '0.9em', color: '#aaa'}}>
+                      Unknown Song
+                   </div>
                 ) : (
                   <div className="track-name">{selectedCountry.genre.split('&')[0].trim()} Mix</div>
                 )}

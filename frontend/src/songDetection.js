@@ -1,54 +1,54 @@
 class SongDetectionService {
   constructor() {
     this.audioContext = null;
-    this.analyser = null;
     this.source = null;
+    this.processor = null;
     this.isDetecting = false;
     this.detectionInterval = null;
-    this.currentSong = null;
     this.onSongDetected = null;
-
-    this.shazamConfig = {
-      apiKey: '15f4b239b2mshaeeae7ac5ddf658p16cffdjsn05fdf1b05836', 
-          // no work i don knowwhy
-      apiHost: 'shazam-api7.p.rapidapi.com',
-      baseUrl: 'https://shazam-api7.p.rapidapi.com'
+    this.auddConfig = {
+      apiToken: '9d3405425f45268e656da60daf37f7f2', 
+      baseUrl: 'https://api.audd.io/'
     };
   }
 
   async initialize(audioElement) {
     try {
+      if (!this.audioContext) {
+        this.audioContext = new (window.AudioContext || window.webkitAudioContext)();
+      }
 
-      this.audioContext = new (window.AudioContext || window.webkitAudioContext)();
+      if (this.audioContext.state === 'suspended') {
+        await this.audioContext.resume();
+      }
+
+      if (this.source) {
+        this.source.disconnect();
+      }
 
       this.source = this.audioContext.createMediaElementSource(audioElement);
-
-      this.analyser = this.audioContext.createAnalyser();
-      this.analyser.fftSize = 2048;
-      this.analyser.smoothingTimeConstant = 0.8;
-
-      this.source.connect(this.analyser);
       this.source.connect(this.audioContext.destination);
 
       return true;
     } catch (error) {
-      console.error('Failed to initialize audio context:', error);
       return false;
     }
   }
 
-  async startDetection(audioElement, onSongDetectedCallback) {
+  async startDetection(audioElement, onSongDetectedCallback, onStatusCallback) {
     if (this.isDetecting) return;
 
     this.onSongDetected = onSongDetectedCallback;
+    this.onStatus = onStatusCallback;
 
     const initialized = await this.initialize(audioElement);
     if (!initialized) {
-      console.error('Failed to initialize audio detection');
+      if (this.onStatus) this.onStatus('error', 'Initialization failed');
       return;
     }
 
     this.isDetecting = true;
+    if (this.onStatus) this.onStatus('detecting');
 
     this.detectionInterval = setInterval(() => {
       this.detectSong(audioElement);
@@ -69,216 +69,136 @@ class SongDetectionService {
     if (this.source) {
       try {
         this.source.disconnect();
-      } catch (e) {
-
-      }
+      } catch (e) {}
     }
 
-    if (this.audioContext && this.audioContext.state !== 'closed') {
-      this.audioContext.close();
+    if (this.processor) {
+      try {
+        this.processor.disconnect();
+      } catch (e) {}
     }
+    
+    this.onSongDetected = null;
+    this.onStatus = null;
   }
 
   async detectSong(audioElement) {
-    if (!this.analyser || !audioElement || audioElement.paused) {
-      console.log('Song detection skipped: analyser not ready or audio paused');
+    if (!audioElement || audioElement.paused) {
       return;
     }
+    
+    if (this.onStatus) this.onStatus('detecting');
 
     try {
-      console.log('Starting song detection...');
-
       const audioData = await this.captureAudioSample();
-      console.log('Audio sample captured, sending to Shazam API...');
+      
+      if (this.isSilence(audioData)) {
+        if (this.onStatus) this.onStatus('error', 'Stream protected');
+        return; 
+      }
 
-      const songInfo = await this.identifyWithShazam(audioData);
+      const songInfo = await this.identifyWithAudD(audioData);
 
-      if (songInfo && songInfo.track) {
-        const track = songInfo.track;
+      if (songInfo) {
         const detectedSong = {
-          title: track.title || 'Unknown',
-          artist: track.subtitle || track.artist || 'Unknown Artist',
-          album: track.sections?.[0]?.metadata?.[0]?.text || track.album || '',
-          duration: track.duration || 0,
+          title: songInfo.title || 'Unknown',
+          artist: songInfo.artist || 'Unknown Artist',
+          album: songInfo.album || '',
+          duration: 0,
           timestamp: new Date().toISOString()
         };
 
-        console.log('Song detected:', detectedSong);
-        this.currentSong = detectedSong;
         if (this.onSongDetected) {
           this.onSongDetected(detectedSong);
         }
-      } else if (songInfo === null) {
-
-        console.log('Song detection failed, will retry on next interval');
+        if (this.onStatus) this.onStatus('success');
       } else {
-        console.log('No track data in Shazam response');
+        if (this.onStatus) this.onStatus('no-match');
       }
     } catch (error) {
-      console.error('Song detection error:', error);
+      if (this.onStatus) this.onStatus('error', error.message);
     }
+  }
+
+  isSilence(audioData) {
+    let sum = 0;
+    for (let i = 0; i < audioData.length; i++) {
+      sum += Math.abs(audioData[i]);
+    }
+    const average = sum / audioData.length;
+    return average < 0.001; 
   }
 
   async captureAudioSample() {
-    return new Promise((resolve) => {
-      const bufferLength = this.analyser.frequencyBinCount;
-      const dataArray = new Uint8Array(bufferLength);
+    return new Promise((resolve, reject) => {
+      if (!this.audioContext || !this.source) {
+        reject(new Error('Audio context not initialized'));
+        return;
+      }
 
-      const samples = [];
-      let sampleCount = 0;
-      const maxSamples = 10; 
+      const bufferSize = 4096;
+      const channels = 1;
+      const duration = 4; 
+      const sampleRate = this.audioContext.sampleRate;
+      const totalSamples = sampleRate * duration;
+      const collectedSamples = new Float32Array(totalSamples);
+      let offset = 0;
 
-      const captureSample = () => {
-        this.analyser.getByteFrequencyData(dataArray);
-        samples.push([...dataArray]);
-        sampleCount++;
+      this.processor = this.audioContext.createScriptProcessor(bufferSize, channels, channels);
 
-        if (sampleCount < maxSamples) {
-          setTimeout(captureSample, 100);
+      this.processor.onaudioprocess = (e) => {
+        const inputData = e.inputBuffer.getChannelData(0);
+        
+        if (offset + inputData.length > totalSamples) {
+          const remaining = totalSamples - offset;
+          collectedSamples.set(inputData.subarray(0, remaining), offset);
+          offset += remaining;
         } else {
-          resolve(samples);
+          collectedSamples.set(inputData, offset);
+          offset += inputData.length;
+        }
+
+        if (offset >= totalSamples) {
+          this.processor.disconnect();
+          this.source.disconnect(this.processor);
+          resolve(collectedSamples);
         }
       };
 
-      captureSample();
+      this.source.connect(this.processor);
+      this.processor.connect(this.audioContext.destination);
     });
   }
 
-  async identifyWithShazam(audioData) {
-
-    if (!this.shazamConfig.apiKey || this.shazamConfig.apiKey === 'YOUR_RAPIDAPI_KEY') {
-      console.warn('Shazam API key not configured. Please add your RapidAPI key in songDetection.js');
-
-      return this.getMockSongData();
-    }
-
+  async identifyWithAudD(audioData) {
     try {
+      const base64Audio = this.encodeWAV(audioData);
 
-      const audioBuffer = this.convertToAudioBuffer(audioData);
-      const base64Audio = await this.audioBufferToBase64(audioBuffer);
+      const formData = new FormData();
+      formData.append('api_token', this.auddConfig.apiToken);
+      formData.append('audio', base64Audio);
+      formData.append('return', 'apple_music,spotify');
 
-      const endpoints = [
-        { url: `${this.shazamConfig.baseUrl}/songs/detect`, body: { audio_base64: base64Audio } },
-        { url: `${this.shazamConfig.baseUrl}/songs/detect`, body: { audio: base64Audio } },
-        { url: `${this.shazamConfig.baseUrl}/songs/recognize`, body: { audio_base64: base64Audio } },
-        { url: `${this.shazamConfig.baseUrl}/search`, body: { audio_base64: base64Audio } }
-      ];
+      const response = await fetch(this.auddConfig.baseUrl, {
+        method: 'POST',
+        body: formData
+      });
 
-      let lastError = null;
-      for (const endpoint of endpoints) {
-        try {
-          console.log(`Trying Shazam endpoint: ${endpoint.url}`);
-          const response = await fetch(endpoint.url, {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'X-RapidAPI-Key': this.shazamConfig.apiKey,
-              'X-RapidAPI-Host': this.shazamConfig.apiHost
-            },
-            body: JSON.stringify(endpoint.body)
-          });
+      const result = await response.json();
 
-          if (!response.ok) {
-            const errorText = await response.text();
-            console.log(`Endpoint ${endpoint.url} returned ${response.status}:`, errorText);
-            lastError = new Error(`Shazam API error: ${response.status} - ${errorText}`);
-            continue; 
-
-          }
-
-          const result = await response.json();
-          console.log('Shazam API response:', result);
-
-          if (result && result.track) {
-            return result;
-          } else if (result && result.matches && result.matches.length > 0) {
-
-            return { track: result.matches[0].track };
-          } else if (result && result.data && result.data.length > 0) {
-
-            return { track: result.data[0].track };
-          } else {
-            console.warn('Shazam API returned no track data:', result);
-            continue; 
-
-          }
-        } catch (endpointError) {
-          console.log(`Endpoint ${endpoint.url} failed:`, endpointError);
-          lastError = endpointError;
-          continue;
-        }
+      if (result && result.status === 'success' && result.result) {
+        return result.result;
       }
-
-      throw lastError || new Error('All Shazam API endpoints failed');
+      return null;
     } catch (error) {
-      console.error('Shazam identification error:', error);
-
       return null;
     }
   }
 
-  async identifyWithShazamFingerprint(audioData) {
-    if (this.shazamConfig.apiKey === 'YOUR_RAPIDAPI_KEY') {
-      return this.getMockSongData();
-    }
-
-    try {
-
-      const fingerprint = await this.createAudioFingerprint(audioData);
-
-      const response = await fetch(`${this.shazamConfig.baseUrl}/songs/search`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-RapidAPI-Key': this.shazamConfig.apiKey,
-          'X-RapidAPI-Host': this.shazamConfig.apiHost
-        },
-        body: JSON.stringify({
-          fingerprint: fingerprint
-        })
-      });
-
-      if (!response.ok) {
-        throw new Error(`Shazam API error: ${response.status}`);
-      }
-
-      const result = await response.json();
-      return result;
-    } catch (error) {
-      console.error('Shazam fingerprint identification error:', error);
-      return this.getMockSongData();
-    }
-  }
-
-  convertToAudioBuffer(samples) {
-    const sampleRate = 44100;
-    const length = samples.length * samples[0].length;
-    const buffer = this.audioContext.createBuffer(1, length, sampleRate);
-    const channelData = buffer.getChannelData(0);
-
-    let index = 0;
-    samples.forEach(sample => {
-      sample.forEach(value => {
-        channelData[index++] = (value / 255) * 2 - 1;
-      });
-    });
-
-    return buffer;
-  }
-
-  async audioBufferToBase64(audioBuffer) {
-
-    const wav = this.audioBufferToWav(audioBuffer);
-    const base64 = btoa(String.fromCharCode(...new Uint8Array(wav)));
-    return base64;
-  }
-
-  audioBufferToWav(audioBuffer) {
-    const length = audioBuffer.length;
-    const sampleRate = audioBuffer.sampleRate;
-    const arrayBuffer = new ArrayBuffer(44 + length * 2);
-    const view = new DataView(arrayBuffer);
-    const channelData = audioBuffer.getChannelData(0);
+  encodeWAV(samples) {
+    const sampleRate = this.audioContext.sampleRate;
+    const buffer = new ArrayBuffer(44 + samples.length * 2);
+    const view = new DataView(buffer);
 
     const writeString = (offset, string) => {
       for (let i = 0; i < string.length; i++) {
@@ -287,7 +207,7 @@ class SongDetectionService {
     };
 
     writeString(0, 'RIFF');
-    view.setUint32(4, 36 + length * 2, true);
+    view.setUint32(4, 36 + samples.length * 2, true);
     writeString(8, 'WAVE');
     writeString(12, 'fmt ');
     view.setUint32(16, 16, true);
@@ -298,46 +218,23 @@ class SongDetectionService {
     view.setUint16(32, 2, true);
     view.setUint16(34, 16, true);
     writeString(36, 'data');
-    view.setUint32(40, length * 2, true);
+    view.setUint32(40, samples.length * 2, true);
 
     let offset = 44;
-    for (let i = 0; i < length; i++) {
-      const sample = Math.max(-1, Math.min(1, channelData[i]));
-      view.setInt16(offset, sample < 0 ? sample * 0x8000 : sample * 0x7FFF, true);
+    for (let i = 0; i < samples.length; i++) {
+      const s = Math.max(-1, Math.min(1, samples[i]));
+      view.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
       offset += 2;
     }
 
-    return arrayBuffer;
-  }
-
-  async createAudioFingerprint(audioData) {
-
-    const bufferLength = audioData[0].length;
-    const fingerprint = [];
-
-    audioData.forEach(sample => {
-      const sum = sample.reduce((a, b) => a + b, 0);
-      const avg = sum / bufferLength;
-      fingerprint.push(Math.round(avg));
-    });
-
-    return fingerprint.join(',');
-  }
-
-  getMockSongData() {
-    const mockSongs = [
-      { track: { title: 'Song Title', subtitle: 'Artist Name', duration: 180000, sections: [{ metadata: [{ text: 'Album Name' }] }] } },
-      { track: { title: 'Another Song', subtitle: 'Another Artist', duration: 200000, sections: [{ metadata: [{ text: 'Another Album' }] }] } },
-      { track: { title: 'Popular Track', subtitle: 'Popular Artist', duration: 195000, sections: [{ metadata: [{ text: 'Popular Album' }] }] } }
-    ];
-
-    return mockSongs[Math.floor(Math.random() * mockSongs.length)];
-  }
-
-  setApiKey(apiKey) {
-    this.shazamConfig.apiKey = apiKey;
+    let binary = '';
+    const bytes = new Uint8Array(buffer);
+    const len = bytes.byteLength;
+    for (let i = 0; i < len; i++) {
+      binary += String.fromCharCode(bytes[i]);
+    }
+    return window.btoa(binary);
   }
 }
 
 export default new SongDetectionService();
-
